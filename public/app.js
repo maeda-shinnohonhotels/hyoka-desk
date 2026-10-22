@@ -417,6 +417,23 @@ VIEWS['hr-list'] = async () => {
 
 // ---------- HR: salary ----------
 const monthly = (r, side) => SALARY_ITEMS.reduce((t, [k]) => t + (Number(r[`${k}_${side}`]) || 0), 0);
+// Rank and raise used for the salary revision: a hand-entered value (e.g. a recommendation) wins over the final review.
+const salaryEval = (r, f) => ({
+  rank: r.eval_rank ?? f?.rank ?? null,
+  up: r.eval_up ?? (r.eval_rank != null ? (S.period?.rank_rules ?? []).find((x) => x.rank === r.eval_rank)?.up ?? null : f?.up_amount ?? null),
+  manual: r.eval_rank != null || r.eval_up != null,
+});
+function evalCell(r, f, editable) {
+  const ev = salaryEval(r, f);
+  const ref = f?.rank ? `評価 ${esc(f.rank)} +${yen(f.up_amount)}` : esc(r.legacy_eval);
+  if (editable) {
+    return `<input class="xs" data-k="eval_rank" value="${esc(r.eval_rank)}" placeholder="${esc(f?.rank ?? '')}">
+      +<input class="sm" data-k="eval_up" value="${r.eval_up ?? ''}" placeholder="${f?.up_amount ?? ''}" inputmode="numeric">
+      <div class="muted" style="font-size:12px">${ref}</div>`;
+  }
+  if (!ev.rank && ev.up == null) return esc(r.legacy_eval);
+  return `<b>${esc(ev.rank)}</b> +${yen(ev.up)}${ev.manual ? ` <span class="chip warn" title="手打ち">手打ち</span><div class="muted" style="font-size:12px">${ref}</div>` : ''}`;
+}
 VIEWS['hr-salary'] = async () => {
   const p = S.period;
   const [rows, emps, fins] = await Promise.all([
@@ -441,7 +458,7 @@ VIEWS['hr-salary'] = async () => {
       <tr><th>施設</th><th>氏名</th><th>等級</th><th>評価</th><th class="num">基本給(前)</th><th class="num">基本給(後)</th>${SALARY_ITEMS.slice(1).map(([, l]) => `<th class="num">${l}(後)</th>`).join('')}<th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">差額</th><th>備考</th>${editable ? '<th></th>' : ''}</tr>
       ${list.map((r) => { const e = empBy[r.employee_id], f = finBy[r.employee_id]; const a = r.base_after != null ? monthly(r, 'after') : null; return `<tr data-id="${r.employee_id}">
         <td>${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
-        <td>${f?.rank ? `<b>${esc(f.rank)}</b> +${yen(f.up_amount)}` : esc(r.legacy_eval)}</td>
+        <td style="white-space:nowrap">${evalCell(r, f, editable)}</td>
         <td class="num">${yen(r.base_before)}</td><td class="num">${inp(r, 'base_after')}</td>
         ${SALARY_ITEMS.slice(1).map(([k]) => `<td class="num">${inp(r, `${k}_after`)}</td>`).join('')}
         <td class="num">${yen(monthly(r, 'before'))}</td><td class="num">${a == null ? '' : yen(a)}</td><td class="num">${a == null ? '' : yen(a - monthly(r, 'before'))}</td>
@@ -451,16 +468,16 @@ VIEWS['hr-salary'] = async () => {
   bindPeriodPicker();
   $('#fac').onchange = () => { sessionStorage.setItem('fac', $('#fac').value); go('hr-salary'); };
   $('#csv').onclick = () => downloadCSV(`給与改定_${p.name}.csv`, [
-    ['施設', '姓', '名', '等級(前)', '等級(後)', '評価', ...SALARY_ITEMS.flatMap(([, l]) => [`${l}(前)`, `${l}(後)`]), '通勤(前)', '通勤(後)', '月額計(前)', '月額計(後)', '差額', '備考'],
+    ['施設', '姓', '名', '等級(前)', '等級(後)', '評価', '昇給額', ...SALARY_ITEMS.flatMap(([, l]) => [`${l}(前)`, `${l}(後)`]), '通勤(前)', '通勤(後)', '月額計(前)', '月額計(後)', '差額', '備考'],
     ...list.map((r) => { const e = empBy[r.employee_id], f = finBy[r.employee_id]; const a = r.base_after != null ? monthly(r, 'after') : ''; return [
-      facName(e.facility_id), e.last_name, e.first_name, r.grade_before, r.grade_after, f?.rank ?? r.legacy_eval ?? '',
+      facName(e.facility_id), e.last_name, e.first_name, r.grade_before, r.grade_after, salaryEval(r, f).rank ?? r.legacy_eval ?? '', salaryEval(r, f).up ?? '',
       ...SALARY_ITEMS.flatMap(([k]) => [r[`${k}_before`], r[`${k}_after`]]), r.commute_before, r.commute_after,
       monthly(r, 'before'), a, a === '' ? '' : a - monthly(r, 'before'), r.note]; }),
   ]);
   if (!editable) return;
   $$('#st .rs').forEach((b) => (b.onclick = async () => {
     const tr = b.closest('tr'); const patch = {};
-    $$('input', tr).forEach((i) => (patch[i.dataset.k] = i.dataset.k === 'note' ? i.value : i.value === '' ? null : Number(i.value.replace(/,/g, ''))));
+    $$('input', tr).forEach((i) => (patch[i.dataset.k] = ['note', 'eval_rank'].includes(i.dataset.k) ? i.value.trim() || null : i.value === '' ? null : Number(i.value.replace(/,/g, ''))));
     await q(sb.from('salary_revisions').update(patch).eq('period_id', p.id).eq('employee_id', tr.dataset.id));
     toast('保存しました'); go('hr-salary');
   }));
@@ -484,11 +501,11 @@ VIEWS['hr-salary'] = async () => {
     toast(`${ins.length}名を取り込みました`); go('hr-salary');
   };
   $('#apply').onclick = async () => {
-    const t = list.filter((r) => finBy[r.employee_id]?.approved_at && r.base_before != null);
-    if (!t.length) return toast('人事承認済みの評価がありません', true);
-    if (!confirm(`人事承認済み ${t.length}名の基本給(後)を「基本給(前)＋昇給額」で上書きします。`)) return;
+    const t = list.filter((r) => (finBy[r.employee_id]?.approved_at || r.eval_up != null) && r.base_before != null);
+    if (!t.length) return toast('人事承認済みの評価・手打ちの昇給額がありません', true);
+    if (!confirm(`人事承認済み・手打ちの ${t.length}名の基本給(後)を「基本給(前)＋昇給額」で上書きします。`)) return;
     for (const r of t) {
-      await q(sb.from('salary_revisions').update({ base_after: r.base_before + (finBy[r.employee_id].up_amount ?? 0) }).eq('period_id', p.id).eq('employee_id', r.employee_id));
+      await q(sb.from('salary_revisions').update({ base_after: r.base_before + (salaryEval(r, finBy[r.employee_id]).up ?? 0) }).eq('period_id', p.id).eq('employee_id', r.employee_id));
     }
     toast('反映しました'); go('hr-salary');
   };
