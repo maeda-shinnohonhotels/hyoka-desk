@@ -126,6 +126,15 @@ function showLogin() {
     <form id="lf" class="row"><input id="em" type="email" required placeholder="name@example.com" class="grow" autocomplete="email">
     <button class="primary">リンクを送信</button></form>
     <p id="lmsg" class="muted"></p></div>`);
+  // A failed login link comes back as #error=...&error_code=...; show it instead of a silent login form.
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('error')) {
+    $('#lmsg').textContent = h.get('error_code') === 'otp_expired'
+      ? 'ログインリンクの期限が切れているか、すでに使えなくなっています。もう一度「リンクを送信」を押し、届いた最新のメールのリンクを開いてください。'
+      : `ログインできませんでした：${h.get('error_description') ?? h.get('error')}`;
+    $('#lmsg').style.color = 'var(--ng)';
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   $('#lf').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#lf button'); btn.disabled = true;
