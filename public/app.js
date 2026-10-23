@@ -2,7 +2,8 @@
 const sb = supabase.createClient(HYOKA_CONFIG.supabaseUrl, HYOKA_CONFIG.supabaseKey);
 
 const STATUS_LABEL = { preparing: '準備中', self: '自己評価 受付中', primary: '一次評価 期間', final: '最終決定 期間', closed: '締め' };
-const ROLE_LABEL = { staff: '一般', evaluator: '評価者', hr: '人事' };
+const ROLE_LABEL = { staff: '一般', evaluator1: '評価者（1次）', evaluator2: '評価者（2次）', hr: '人事', director: '取締役' };
+const HR_ROLES = ['hr', 'director'];
 const RUBRIC = [
   [5, '異次元', '【他者への波及】自分ができるだけでなく、周囲の手本となり、他者や組織全体のレベルを引き上げている。'],
   [4, '優秀', '【自立＋アルファ】誰の指示も受けずに完璧にこなし、さらに効率化や改善の提案・実行まで行っている。'],
@@ -23,7 +24,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const yen = (n) => (n == null || n === '' ? '' : Number(n).toLocaleString('ja-JP'));
 const fullName = (e) => e ? `${e.last_name} ${e.first_name}`.trim() : '';
-const isHR = () => S.me?.role === 'hr';
+const isHR = () => HR_ROLES.includes(S.me?.role);
 const facName = (id) => S.facilities.find((f) => f.id === id)?.name ?? '';
 
 function toast(msg, err = false) {
@@ -265,8 +266,9 @@ async function evalDetail(empId) {
   const R = await loadReviews([empId]);
   const self = R.self[empId] ?? {}, prim = R.prim[empId] ?? {}, fin = R.fin[empId] ?? {};
   const kpi = fin.kpi_score ?? kpiFor(emp.facility_id);
-  const primEditable = (isHR() || (['self', 'primary'].includes(p.status) && !prim.submitted_at)) && p.status !== 'closed';
-  const finEditable = (isHR() ? !fin.approved_at : ['primary', 'final'].includes(p.status) && !fin.submitted_at) && p.status !== 'closed';
+  // 1次 enters the primary review, 2次 the final decision; HR and directors can do both.
+  const primEditable = (isHR() || (S.me.role === 'evaluator1' && ['self', 'primary'].includes(p.status) && !prim.submitted_at)) && p.status !== 'closed';
+  const finEditable = (isHR() ? !fin.approved_at : S.me.role === 'evaluator2' && ['primary', 'final'].includes(p.status) && !fin.submitted_at) && p.status !== 'closed';
   const finScores = Object.keys(fin.scores ?? {}).length ? fin.scores : prim.scores;
   const totalWith = (scores) => sumScores(scores) + (kpi ?? 0) * p.kpi_weight;
   render(`
@@ -288,7 +290,7 @@ async function evalDetail(empId) {
     </div>
     <div class="panel">
       <h2 style="margin-top:0">最終決定（面談後） ${fin.submitted_at ? '<span class="chip ok">提出済み</span>' : ''}</h2>
-      ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? '<p class="muted">一次評価期間になると入力できます。</p>' : `
+      ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? `<p class="muted">${S.me.role === 'evaluator2' ? '一次評価期間になると入力できます。' : '最終決定は評価者（2次）が入力します。'}</p>` : `
       <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]] })}
         <p>合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankOf(totalWith(finScores))?.rank ?? '')}</b>（+${yen(rankOf(totalWith(finScores))?.up)}円）</p>
         <label class="field">本人へのフィードバック（公開時に本人に表示されます）<textarea id="fc" ${finEditable ? '' : 'disabled'}>${esc(fin.comment)}</textarea></label>
@@ -538,7 +540,7 @@ VIEWS['hr-staff'] = async () => {
         <select id="bev">${evaluators.map((e) => `<option value="${e.id}">${esc(fullName(e))}（${esc(facName(e.facility_id))}）</option>`).join('')}</select>
         を評価者として <button id="badd">追加</button><button id="bdel" class="danger">外す</button>
       </div>
-      <p class="muted">評価者の候補は、権限が「評価者」または「人事」の社員です。先に下の一覧で権限を変更してください。</p>
+      <p class="muted">評価者の候補は、権限が「一般」以外の社員です。評価者（1次）は一次評価、評価者（2次）は最終決定を入力します。先に下の一覧で権限を変更してください。</p>
     </div>
     <div class="panel scroll"><table id="et">
       <tr><th>施設</th><th>氏名</th><th>等級</th><th>メール</th><th>権限</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
@@ -569,7 +571,7 @@ VIEWS['hr-staff'] = async () => {
       const k = i.dataset.k;
       patch[k] = i.type === 'checkbox' ? i.checked : k === 'facility_id' ? Number(i.value) : i.value.trim() || null;
     });
-    if (tr.dataset.id === S.me.id && patch.role !== 'hr' && !confirm('自分の人事権限を外すと、この画面に戻れなくなります。続けますか？')) return;
+    if (tr.dataset.id === S.me.id && !HR_ROLES.includes(patch.role) && !confirm('自分の人事権限を外すと、この画面に戻れなくなります。続けますか？')) return;
     await q(sb.from('employees').update(patch).eq('id', tr.dataset.id));
     toast('保存しました'); go('hr-staff');
   }));
