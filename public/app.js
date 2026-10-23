@@ -177,8 +177,11 @@ function rubricHTML(track = 'general') {
 
 // ---------- boot / auth ----------
 async function boot() {
+  // A fresh login (email link or password) starts on the default period and first screen, not on what was open before.
+  const freshLogin = /access_token=/.test(location.hash) || sessionStorage.getItem('freshLogin');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) return showLogin();
+  if (freshLogin) ['freshLogin', 'period', 'view'].forEach((k) => sessionStorage.removeItem(k));
   const myId = await q(sb.rpc('link_me'));
   if (!myId) {
     $('#who').innerHTML = `${esc(session.user.email)} <button id="logout">ログアウト</button>`;
@@ -192,7 +195,9 @@ async function boot() {
     q(sb.from('periods').select('*').order('starts_on', { ascending: false })),
   ]);
   const saved = Number(sessionStorage.getItem('period'));
-  await setPeriod(S.periods.find((p) => p.id === saved) ?? S.periods.find((p) => p.status !== 'closed' && p.status !== 'preparing') ?? S.periods.find((p) => p.status !== 'closed') ?? S.periods[0]);
+  // Open on the period in progress; if none, the latest one that has started (skip periods still 準備中).
+  await setPeriod(S.periods.find((p) => p.id === saved) ?? S.periods.find((p) => p.status !== 'closed' && p.status !== 'preparing')
+    ?? S.periods.find((p) => p.status !== 'preparing') ?? S.periods[0]);
   $('#who').innerHTML = `${esc(fullName(S.me))}（${ROLE_LABEL[S.me.role]}） <button id="pwset">パスワード設定</button><button id="logout">ログアウト</button>`;
   $('#pwset').onclick = () => go('password');
   $('#logout').onclick = logout;
@@ -207,7 +212,7 @@ async function setPeriod(p) {
     q(sb.from('facility_kpis').select('*').eq('period_id', p.id)),
   ]);
 }
-async function logout() { await sb.auth.signOut(); location.reload(); }
+async function logout() { await sb.auth.signOut(); ['period', 'view'].forEach((k) => sessionStorage.removeItem(k)); location.reload(); }
 
 function showLogin() {
   $('#nav').innerHTML = ''; $('#who').innerHTML = '';
@@ -252,6 +257,7 @@ function showLogin() {
       $('#pmsg').style.color = 'var(--ng)';
       return;
     }
+    sessionStorage.setItem('freshLogin', '1');
     location.reload();
   };
 }
