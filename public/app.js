@@ -235,7 +235,9 @@ function showLogin() {
   $('#lf').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#lf button'); btn.disabled = true;
-    const { error } = await sb.auth.signInWithOtp({ email: $('#em').value.trim(), options: { emailRedirectTo: location.origin + location.pathname } });
+    // Send the site root without a trailing slash so it matches the Redirect URL saved in Supabase exactly.
+    const back = location.origin + (location.pathname === '/' ? '' : location.pathname);
+    const { error } = await sb.auth.signInWithOtp({ email: $('#em').value.trim(), options: { emailRedirectTo: back } });
     btn.disabled = false;
     $('#lmsg').textContent = error ? `送信できませんでした：${error.message}` : 'メールを送信しました。届いたリンクを開いてください（迷惑メールフォルダもご確認ください）。';
   };
