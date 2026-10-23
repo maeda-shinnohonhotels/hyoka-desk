@@ -26,6 +26,8 @@ const yen = (n) => (n == null || n === '' ? '' : Number(n).toLocaleString('ja-JP
 const fullName = (e) => e ? `${e.last_name} ${e.first_name}`.trim() : '';
 const isHR = () => HR_ROLES.includes(S.me?.role);
 const facName = (id) => S.facilities.find((f) => f.id === id)?.name ?? '';
+// Sort facilities in their configured order, not alphabetically.
+const facSort = (id) => S.facilities.find((f) => f.id === id)?.sort ?? 99;
 
 function toast(msg, err = false) {
   const t = $('#toast');
@@ -38,6 +40,57 @@ async function q(p) {
   return data;
 }
 function render(html) { $('#app').innerHTML = html; }
+// Filter values live in sessionStorage so they survive the re-render after each save.
+const filterVal = (key) => sessionStorage.getItem(key) ?? '';
+function bindFilters(view, map) {
+  for (const [id, key] of Object.entries(map)) {
+    const el = $(`#${id}`);
+    if (el) el.onchange = () => { sessionStorage.setItem(key, el.value.trim()); go(view); };
+  }
+}
+const optionsHTML = (opts, sel) => opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
+
+// Click a column header to sort by it; click again to reverse. Cells may hold inputs, so read their values;
+// a td can override its sort value with data-sort. Blank cells always sort last.
+function sortable(table, key) {
+  if (!table) return;
+  const head = table.rows[0];
+  const ths = [...head.cells];
+  const cellVal = (td) => {
+    if (td.dataset.sort != null) return td.dataset.sort;
+    const el = td.querySelector('select, input');
+    if (!el) return td.innerText.trim();
+    if (el.type === 'checkbox') return el.checked ? '1' : '0';
+    return el.tagName === 'SELECT' ? el.selectedOptions[0]?.text ?? '' : el.value.trim();
+  };
+  const num = (s) => { const t = s.replace(/[,+円\s]/g, ''); return t !== '' && !isNaN(t) ? Number(t) : null; };
+  const apply = (st) => {
+    ths.forEach((th, i) => { if (i === st?.col) th.dataset.dir = st.dir; else delete th.dataset.dir; th.textContent = th.dataset.label + (i === st?.col ? (st.dir === 'asc' ? ' ▲' : ' ▼') : ''); });
+    if (!st) return;
+    const rows = [...table.rows].slice(1);
+    rows.sort((a, b) => {
+      const va = cellVal(a.cells[st.col]), vb = cellVal(b.cells[st.col]);
+      if (!va || !vb) return !va - !vb;
+      const na = num(va), nb = num(vb);
+      const c = na != null && nb != null ? na - nb : va.localeCompare(vb, 'ja');
+      return st.dir === 'asc' ? c : -c;
+    });
+    head.parentNode.append(...rows);
+  };
+  ths.forEach((th, i) => {
+    th.dataset.label = th.textContent;
+    if (!th.dataset.label) return;
+    th.classList.add('sort');
+    th.title = 'クリックで並べ替え';
+    th.onclick = () => {
+      const cur = JSON.parse(sessionStorage.getItem(`sort:${key}`) || 'null');
+      const st = { col: i, dir: cur?.col === i && cur.dir === 'asc' ? 'desc' : 'asc' };
+      sessionStorage.setItem(`sort:${key}`, JSON.stringify(st));
+      apply(st);
+    };
+  });
+  apply(JSON.parse(sessionStorage.getItem(`sort:${key}`) || 'null'));
+}
 function downloadCSV(name, rows) {
   const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const a = document.createElement('a');
@@ -46,8 +99,23 @@ function downloadCSV(name, rows) {
 }
 
 // ---------- scoring ----------
-function sumScores(scores, criteria = S.criteria) {
-  return criteria.reduce((t, c) => t + (Number(scores?.[c.id]) || 0) * c.weight, 0);
+// Two evaluation tracks: general staff (level x weight + KPI, ranked) and managers (points per level, 100 points, no KPI or rank).
+const TRACK_LABEL = { general: '一般', manager: '管理者' };
+const trackOf = (e) => e?.eval_track ?? 'general';
+const isMgr = (e) => trackOf(e) === 'manager';
+const critOf = (track = 'general') => S.criteria.filter((c) => (c.track ?? 'general') === track);
+// A review keeps the track of the items it was scored on (as compute_final does), even if the employee's 評価区分 changed later.
+const scoredTrack = (...scoresList) => {
+  for (const s of scoresList) {
+    const c = s && S.criteria.find((x) => String(x.id) in s);
+    if (c) return c.track ?? 'general';
+  }
+  return null;
+};
+const pointsOf = (c, level) => (c.points ? c.points[level - 1] : level * c.weight);
+const maxScore = (criteria) => criteria.reduce((t, c) => t + pointsOf(c, 5), 0);
+function sumScores(scores, criteria = critOf()) {
+  return criteria.reduce((t, c) => t + (Number(scores?.[c.id]) ? pointsOf(c, Number(scores[c.id])) : 0), 0);
 }
 function rankOf(total, period = S.period) {
   const rules = [...(period?.rank_rules ?? [])].sort((a, b) => b.min - a.min);
@@ -56,30 +124,51 @@ function rankOf(total, period = S.period) {
 function kpiFor(facilityId) {
   return S.kpis?.find((k) => k.facility_id === facilityId)?.kpi_score ?? null;
 }
-function complete(scores) { return S.criteria.every((c) => scores?.[c.id]); }
+function complete(scores, criteria = critOf()) { return criteria.every((c) => scores?.[c.id]); }
 
-function scaleHTML(name, value, { readonly = false, refs = [] } = {}) {
+// Scores are stored as levels 1..5; the buttons and references show each level's points.
+function scaleHTML(name, value, c, { readonly = false, refs = [] } = {}) {
   const opts = [1, 2, 3, 4, 5].map((n) =>
-    `<label><input type="radio" name="${name}" value="${n}" ${Number(value) === n ? 'checked' : ''} ${readonly ? 'disabled' : ''}><span>${n}</span></label>`).join('');
-  const refHTML = refs.map(([label, v]) => `<div class="ref">${esc(label)}<br><b>${v ?? '–'}</b></div>`).join('');
+    `<label><input type="radio" name="${name}" value="${n}" ${Number(value) === n ? 'checked' : ''} ${readonly ? 'disabled' : ''}><span>${pointsOf(c, n) / (c.points ? 1 : c.weight)}</span></label>`).join('');
+  const refHTML = refs.map(([label, v]) => `<div class="ref">${esc(label)}<br><b>${v ? (c.points ? pointsOf(c, v) : v) : '–'}</b></div>`).join('');
   return `<div class="row">${refHTML}<div class="scale ${readonly ? 'ro' : ''}">${opts}</div></div>`;
 }
+// opts.actions shows the employee's 主要アクション per item (管理シート); opts.actionsEdit makes them editable.
 function criteriaForm(prefix, scores, opts = {}) {
-  return S.criteria.map((c) => `
+  return (opts.crit ?? critOf()).map((c) => {
+    const act = opts.actions?.[c.id];
+    const actionHTML = !c.action_label || !(opts.actionsEdit || opts.actions) ? ''
+      : `<div class="action"><div class="desc">${esc(c.action_label)}</div>${opts.actionsEdit
+        ? `<textarea name="a${c.id}" rows="3">${esc(act)}</textarea>`
+        : `<div class="action-text">${act ? esc(act).replace(/\n/g, '<br>') : '<span class="muted">（記入なし）</span>'}</div>`}</div>`;
+    return `
     <div class="crit">
-      <div><div class="name">${esc(c.name)}${c.weight > 1 ? ` <span class="chip">×${c.weight}</span>` : ''}</div><div class="desc">${esc(c.description)}</div></div>
-      ${scaleHTML(`${prefix}${c.id}`, scores?.[c.id], { readonly: opts.readonly, refs: (opts.refs ?? []).map(([l, s]) => [l, s?.[c.id]]) })}
-    </div>`).join('');
+      <div><div class="name">${esc(c.name)}${c.points ? ` <span class="chip">${pointsOf(c, 5)}点</span>` : c.weight > 1 ? ` <span class="chip">×${c.weight}</span>` : ''}</div><div class="desc">${esc(c.description)}</div>${c.note ? `<div class="desc note">${esc(c.note)}</div>` : ''}</div>
+      ${scaleHTML(`${prefix}${c.id}`, scores?.[c.id], c, { readonly: opts.readonly, refs: (opts.refs ?? []).map(([l, s]) => [l, s?.[c.id]]) })}
+      ${actionHTML}
+    </div>`;
+  }).join('');
 }
-function readScores(prefix, root = document) {
+function readActions(criteria, root = document) {
   const out = {};
-  for (const c of S.criteria) {
+  for (const c of criteria) {
+    const v = $(`textarea[name="a${c.id}"]`, root)?.value.trim();
+    if (v) out[c.id] = v;
+  }
+  return out;
+}
+function readScores(prefix, criteria = critOf(), root = document) {
+  const out = {};
+  for (const c of criteria) {
     const v = $(`input[name="${prefix}${c.id}"]:checked`, root)?.value;
     if (v) out[c.id] = Number(v);
   }
   return out;
 }
-function rubricHTML() {
+function rubricHTML(track = 'general') {
+  if (track === 'manager') {
+    return `<p class="rubric">管理者評価：${critOf('manager').length}項目・${maxScore(critOf('manager'))}点満点。項目ごとに配点が違います（ボタンの数字が点数）。事業所の実績・ランクはなく、昇給額は人事が給与改定で決めます。</p>`;
+  }
   return `<details class="rubric"><summary>評価基準（1〜5の定義）</summary>
     ${RUBRIC.map(([n, t, d]) => `<div><b>${n}（${t}）</b> ${esc(d)}</div>`).join('')}
     <div style="margin-top:6px">ランク：${(S.period?.rank_rules ?? []).map((r) => `<b>${esc(r.rank)}</b> ${r.min}点〜（+${yen(r.up)}円）`).join(' ／ ')}</div>
@@ -178,28 +267,29 @@ VIEWS.self = async () => {
   const p = S.period;
   const row = (await q(sb.from('self_reviews').select('*').eq('period_id', p.id).eq('employee_id', S.me.id).maybeSingle())) ?? {};
   const editable = p.status === 'self' && !row.submitted_at;
-  const total = sumScores(row.scores);
+  const crit = critOf(trackOf(S.me));
+  const total = sumScores(row.scores, crit);
   render(`
     <div class="row"><h1 class="grow">自己評価</h1>${periodPicker()}</div>
     <div class="panel">
       <div class="row"><div class="grow">${esc(fullName(S.me))}　${esc(facName(S.me.facility_id))}</div>
         ${row.submitted_at ? `<span class="chip ok">提出済み ${new Date(row.submitted_at).toLocaleDateString('ja-JP')}</span>` : p.status === 'self' ? '<span class="chip warn">未提出</span>' : `<span class="chip">${STATUS_LABEL[p.status]}</span>`}</div>
       ${!editable && !row.submitted_at ? '<p class="muted">現在は自己評価の受付期間ではありません。</p>' : ''}
-      ${rubricHTML()}
-      <form id="sf">${criteriaForm('s', row.scores, { readonly: !editable })}
-        <p class="muted">項目合計：<b id="stot">${total}</b> / ${S.criteria.reduce((t, c) => t + 5 * c.weight, 0)}点（事業所の実績・成果は人事が記入します）</p>
+      ${rubricHTML(trackOf(S.me))}
+      <form id="sf">${criteriaForm('s', row.scores, { readonly: !editable, crit, actions: row.actions ?? {}, actionsEdit: editable })}
+        <p class="muted">項目合計：<b id="stot">${total}</b> / ${maxScore(crit)}点${isMgr(S.me) ? '' : '（事業所の実績・成果は人事が記入します）'}</p>
         <label class="field">今期がんばったこと・来期の目標など<textarea id="sc" ${editable ? '' : 'disabled'}>${esc(row.comment)}</textarea></label>
         ${editable ? '<div class="row" style="margin-top:12px"><button type="button" id="ssave">下書き保存</button><button type="button" id="ssub" class="primary">提出する</button></div>' : ''}
       </form>
     </div>`);
   bindPeriodPicker();
   if (!editable) return;
-  $('#sf').onchange = () => ($('#stot').textContent = sumScores(readScores('s')));
+  $('#sf').onchange = () => ($('#stot').textContent = sumScores(readScores('s', crit), crit));
   const save = async (submit) => {
-    const scores = readScores('s');
-    if (submit && !complete(scores)) return toast('すべての項目を選択してください', true);
+    const scores = readScores('s', crit);
+    if (submit && !complete(scores, crit)) return toast('すべての項目を選択してください', true);
     if (submit && !confirm('提出すると修正できません。提出しますか？')) return;
-    await q(sb.from('self_reviews').upsert({ period_id: p.id, employee_id: S.me.id, scores, comment: $('#sc').value, submitted_at: submit ? new Date().toISOString() : null }));
+    await q(sb.from('self_reviews').upsert({ period_id: p.id, employee_id: S.me.id, scores, actions: readActions(crit), comment: $('#sc').value, submitted_at: submit ? new Date().toISOString() : null }));
     toast(submit ? '提出しました' : '保存しました'); go('self');
   };
   $('#ssave').onclick = () => save(false);
@@ -209,37 +299,44 @@ VIEWS.self = async () => {
 VIEWS.results = async () => {
   const rows = await q(sb.from('final_reviews').select('*, periods(name, rank_rules)').eq('employee_id', S.me.id).eq('published', true));
   const allCrit = rows.length ? await q(sb.from('criteria').select('*').in('period_id', rows.map((r) => r.period_id)).order('sort')) : [];
-  render(`<h1>評価結果</h1>${rows.length ? rows.map((r) => `
+  const trackOfRow = (r) => allCrit.find((c) => c.period_id === r.period_id && String(c.id) in (r.scores ?? {}))?.track ?? trackOf(S.me);
+  render(`<h1>評価結果</h1>${rows.length ? rows.map((r) => { const mgr = trackOfRow(r) === 'manager'; return `
     <div class="panel">
       <h2 style="margin-top:0">${esc(r.periods?.name)}</h2>
-      <div class="summary"><div>合計 <span class="big">${r.total}</span> 点</div><div>ランク <span class="big">${esc(r.rank)}</span></div><div>昇給 <b>+${yen(r.up_amount)}円</b>（基本給）</div></div>
-      <table style="margin-top:12px"><tr><th>項目</th><th class="num">評価</th></tr>
-      <tr><td>事業所の実績・成果</td><td class="num">${r.kpi_score ?? '–'}</td></tr>
-      ${allCrit.filter((c) => c.period_id === r.period_id).map((c) => `<tr><td>${esc(c.name)}</td><td class="num">${r.scores?.[c.id] ?? '–'}</td></tr>`).join('')}</table>
+      <div class="summary"><div>合計 <span class="big">${r.total}</span> 点</div>${mgr ? '' : `<div>ランク <span class="big">${esc(r.rank)}</span></div><div>昇給 <b>+${yen(r.up_amount)}円</b>（基本給）</div>`}</div>
+      <table style="margin-top:12px"><tr><th>項目</th><th class="num">${mgr ? '点数' : '評価'}</th></tr>
+      ${mgr ? '' : `<tr><td>事業所の実績・成果</td><td class="num">${r.kpi_score ?? '–'}</td></tr>`}
+      ${allCrit.filter((c) => c.period_id === r.period_id && (c.track ?? 'general') === trackOfRow(r)).map((c) => `<tr><td>${esc(c.name)}</td><td class="num">${r.scores?.[c.id] ? (c.points ? pointsOf(c, r.scores[c.id]) : r.scores[c.id]) : '–'}</td></tr>`).join('')}</table>
       ${r.comment ? `<h2>評価者コメント</h2><p>${esc(r.comment).replace(/\n/g, '<br>')}</p>` : ''}
-    </div>`).join('') : '<div class="panel muted">公開された評価結果はまだありません。</div>'}`);
+    </div>`; }).join('') : '<div class="panel muted">公開された評価結果はまだありません。</div>'}`);
 };
 
 async function loadReviews(ids) {
   const p = S.period.id;
   const chunk = (tbl, cols) => ids.length ? q(sb.from(tbl).select(cols).eq('period_id', p).in('employee_id', ids)) : [];
   const [self, prim, fin] = await Promise.all([
-    chunk('self_reviews', 'employee_id, scores, comment, submitted_at'),
+    chunk('self_reviews', 'employee_id, scores, actions, comment, submitted_at'),
     chunk('primary_reviews', 'employee_id, scores, comment, interview_note, submitted_at'),
     chunk('final_reviews', '*'),
   ]);
   const by = (arr) => Object.fromEntries(arr.map((r) => [r.employee_id, r]));
   return { self: by(self), prim: by(prim), fin: by(fin) };
 }
-function stageChip(id, R) {
+const STAGES = [['未着手', ''], ['自己評価提出済み', 'warn'], ['一次評価済み', 'warn'], ['最終提出済み', 'ok'], ['人事承認済み', 'ok'], ['公開済み', 'ok']];
+function stageLabel(id, R) {
   const f = R.fin[id];
-  if (f?.published) return '<span class="chip ok">公開済み</span>';
-  if (f?.approved_at) return '<span class="chip ok">人事承認済み</span>';
-  if (f?.submitted_at) return '<span class="chip ok">最終提出済み</span>';
-  if (R.prim[id]?.submitted_at) return '<span class="chip warn">一次評価済み</span>';
-  if (R.self[id]?.submitted_at) return '<span class="chip warn">自己評価提出済み</span>';
-  return '<span class="chip">未着手</span>';
+  if (f?.published) return '公開済み';
+  if (f?.approved_at) return '人事承認済み';
+  if (f?.submitted_at) return '最終提出済み';
+  if (R.prim[id]?.submitted_at) return '一次評価済み';
+  if (R.self[id]?.submitted_at) return '自己評価提出済み';
+  return '未着手';
 }
+function stageChip(id, R) {
+  const l = stageLabel(id, R);
+  return `<span class="chip ${STAGES.find(([s]) => s === l)[1]}">${l}</span>`;
+}
+const rankOptions = (all) => [['', all], ...(S.period?.rank_rules ?? []).map((r) => [r.rank, r.rank]).sort(), ['-', '評価なし']];
 
 VIEWS.evaluate = async (empId) => {
   if (empId) return evalDetail(empId);
@@ -265,24 +362,29 @@ async function evalDetail(empId) {
   const emp = await q(sb.from('employees').select('*').eq('id', empId).single());
   const R = await loadReviews([empId]);
   const self = R.self[empId] ?? {}, prim = R.prim[empId] ?? {}, fin = R.fin[empId] ?? {};
-  const kpi = fin.kpi_score ?? kpiFor(emp.facility_id);
+  const track = scoredTrack(fin.scores, prim.scores, self.scores) ?? trackOf(emp);
+  const mgr = track === 'manager', crit = critOf(track);
+  const kpi = mgr ? null : fin.kpi_score ?? kpiFor(emp.facility_id);
   // 1次 enters the primary review, 2次 the final decision; HR and directors can do both.
   const primEditable = (isHR() || (S.me.role === 'evaluator1' && ['self', 'primary'].includes(p.status) && !prim.submitted_at)) && p.status !== 'closed';
   const finEditable = (isHR() ? !fin.approved_at : S.me.role === 'evaluator2' && ['primary', 'final'].includes(p.status) && !fin.submitted_at) && p.status !== 'closed';
   const finScores = Object.keys(fin.scores ?? {}).length ? fin.scores : prim.scores;
-  const totalWith = (scores) => sumScores(scores) + (kpi ?? 0) * p.kpi_weight;
+  const totalWith = (scores) => sumScores(scores, crit) + (kpi ?? 0) * p.kpi_weight;
+  const rankTxt = (t) => (mgr ? '' : rankOf(t)?.rank ?? '');
   render(`
-    <div class="row"><button id="back">← 一覧へ</button><h1 class="grow" style="margin:0">${esc(fullName(emp))}</h1>${stageChip(empId, R)}</div>
+    <div class="row"><button id="back">← 一覧へ</button><h1 class="grow" style="margin:0">${esc(fullName(emp))}</h1>${mgr ? '<span class="chip">管理者</span>' : ''}${stageChip(empId, R)}</div>
     <p class="muted">${esc(facName(emp.facility_id))}　${esc(emp.grade)}　入社 ${esc(emp.hire_date)}　／　${esc(p.name)}</p>
-    ${rubricHTML()}
+    ${track !== trackOf(emp) ? `<p class="muted"><span class="chip warn">区分の変更</span>　この期の評価は「${TRACK_LABEL[track]}」の項目で入力されています（今の評価区分は「${TRACK_LABEL[trackOf(emp)]}」）。</p>` : ''}
+    ${rubricHTML(track)}
     <div class="panel">
       <h2 style="margin-top:0">本人の自己評価 ${self.submitted_at ? '<span class="chip ok">提出済み</span>' : '<span class="chip">未提出</span>'}</h2>
       ${self.comment ? `<p>${esc(self.comment).replace(/\n/g, '<br>')}</p>` : '<p class="muted">コメントなし</p>'}
     </div>
     <div class="panel">
       <h2 style="margin-top:0">一次評価 ${prim.submitted_at ? '<span class="chip ok">提出済み</span>' : ''}</h2>
-      <form id="pf">${criteriaForm('p', prim.scores, { readonly: !primEditable, refs: [['自己', self.scores]] })}
-        <p>事業所の実績・成果：<b>${kpi ?? '未設定'}</b> ×${p.kpi_weight}　／　見込み合計 <b id="ptot">${totalWith(prim.scores)}</b>点 → <b id="prank">${esc(rankOf(totalWith(prim.scores))?.rank ?? '')}</b></p>
+      <form id="pf">${criteriaForm('p', prim.scores, { readonly: !primEditable, refs: [['自己', self.scores]], crit, actions: crit.some((c) => c.action_label) ? self.actions ?? {} : null })}
+        <p>${mgr ? `見込み合計 <b id="ptot">${totalWith(prim.scores)}</b> / ${maxScore(crit)}点<b id="prank"></b>`
+          : `事業所の実績・成果：<b>${kpi ?? '未設定'}</b> ×${p.kpi_weight}　／　見込み合計 <b id="ptot">${totalWith(prim.scores)}</b>点 → <b id="prank">${esc(rankTxt(totalWith(prim.scores)))}</b>`}</p>
         <label class="field">評価コメント（本人には公開されません）<textarea id="pc" ${primEditable ? '' : 'disabled'}>${esc(prim.comment)}</textarea></label>
         <label class="field">面談メモ（自己評価とのギャップ・確認ポイント）<textarea id="pi" ${primEditable ? '' : 'disabled'}>${esc(prim.interview_note)}</textarea></label>
         ${primEditable ? '<div class="row" style="margin-top:12px"><button type="button" id="psave">下書き保存</button><button type="button" id="psub" class="primary">一次評価を提出</button></div>' : ''}
@@ -291,8 +393,9 @@ async function evalDetail(empId) {
     <div class="panel">
       <h2 style="margin-top:0">最終決定（面談後） ${fin.submitted_at ? '<span class="chip ok">提出済み</span>' : ''}</h2>
       ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? `<p class="muted">${S.me.role === 'evaluator2' ? '一次評価期間になると入力できます。' : '最終決定は評価者（2次）が入力します。'}</p>` : `
-      <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]] })}
-        <p>合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankOf(totalWith(finScores))?.rank ?? '')}</b>（+${yen(rankOf(totalWith(finScores))?.up)}円）</p>
+      <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]], crit })}
+        <p>${mgr ? `合計 <b id="ftot">${totalWith(finScores)}</b> / ${maxScore(crit)}点<b id="frank"></b>（昇給額は給与改定で決めます）`
+          : `合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankTxt(totalWith(finScores)))}</b>（+${yen(rankOf(totalWith(finScores))?.up)}円）`}</p>
         <label class="field">本人へのフィードバック（公開時に本人に表示されます）<textarea id="fc" ${finEditable ? '' : 'disabled'}>${esc(fin.comment)}</textarea></label>
         ${finEditable ? '<div class="row" style="margin-top:12px"><button type="button" id="fsave">下書き保存</button><button type="button" id="fsub" class="primary">最終評価を提出</button></div>' : ''}
       </form>`}
@@ -305,16 +408,16 @@ async function evalDetail(empId) {
     </div>`);
   $('#back').onclick = () => go(isHR() && S.view !== 'evaluate' ? S.view : 'evaluate');
   const recalc = (prefix, tot, rank) => {
-    const t = totalWith(readScores(prefix));
-    $(tot).textContent = t; $(rank).textContent = rankOf(t)?.rank ?? '';
+    const t = totalWith(readScores(prefix, crit));
+    $(tot).textContent = t; $(rank).textContent = rankTxt(t);
   };
   if ($('#pf')) $('#pf').onchange = () => recalc('p', '#ptot', '#prank');
   if ($('#ff')) $('#ff').onchange = () => recalc('f', '#ftot', '#frank');
   const back = () => evalDetail(empId).catch((e) => toast(e.message, true));
   if (primEditable) {
     const save = async (submit) => {
-      const scores = readScores('p');
-      if (submit && !complete(scores)) return toast('すべての項目を選択してください', true);
+      const scores = readScores('p', crit);
+      if (submit && !complete(scores, crit)) return toast('すべての項目を選択してください', true);
       await q(sb.from('primary_reviews').upsert({ period_id: p.id, employee_id: empId, scores, comment: $('#pc').value, interview_note: $('#pi').value,
         submitted_at: submit ? new Date().toISOString() : prim.submitted_at ?? null, submitted_by: S.me.id }));
       toast(submit ? '一次評価を提出しました' : '保存しました'); back();
@@ -324,8 +427,8 @@ async function evalDetail(empId) {
   }
   if (finEditable && $('#ff')) {
     const save = async (submit) => {
-      const scores = readScores('f');
-      if (submit && !complete(scores)) return toast('すべての項目を選択してください', true);
+      const scores = readScores('f', crit);
+      if (submit && !complete(scores, crit)) return toast('すべての項目を選択してください', true);
       if (submit && !confirm('最終評価を提出します。提出後は人事の承認待ちになります。')) return;
       await q(sb.from('final_reviews').upsert({ period_id: p.id, employee_id: empId, scores, comment: $('#fc').value,
         kpi_score: kpi, submitted_at: submit ? new Date().toISOString() : fin.submitted_at ?? null, submitted_by: S.me.id }));
@@ -379,21 +482,38 @@ VIEWS['hr-list'] = async () => {
   const emps = await targets();
   const R = await loadReviews(emps.map((e) => e.id));
   const fac = Number(sessionStorage.getItem('fac')) || 0;
-  const list = emps.filter((e) => !fac || e.facility_id === fac);
-  const tot = (s) => (s && Object.keys(s).length ? sumScores(s) : '');
+  const track = filterVal('ltrack') || 'general', mgr = track === 'manager', crit = critOf(track);
+  const kw = filterVal('lkw'), rk = mgr ? '' : filterVal('lrank'), stg = filterVal('lstage');
+  // Group by the items each review was scored on, falling back to the employee's current 評価区分.
+  const trackFor = (e) => scoredTrack(R.fin[e.id]?.scores, R.prim[e.id]?.scores, R.self[e.id]?.scores) ?? trackOf(e);
+  const inTrack = emps.filter((e) => trackFor(e) === track);
+  // The bulk buttons and CSV act on exactly the rows shown, so the tab and filters also narrow their targets.
+  const list = inTrack.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw))
+    && (!rk || (R.fin[e.id]?.rank ?? '-') === rk) && (!stg || stageLabel(e.id, R) === stg));
+  const tot = (s) => (s && Object.keys(s).length ? sumScores(s, crit) : '');
+  const count = (t) => emps.filter((e) => trackFor(e) === t).length;
   render(`
     <div class="row"><h1 class="grow">評価一覧</h1>${periodPicker()}
-      <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <button id="approveAll">提出済みを一括承認</button><button id="publishAll" class="primary">承認済みを一括公開</button><button id="csv">CSV出力</button></div>
-    <div class="panel scroll"><table>
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th><th class="num">KPI</th><th class="num">最終合計</th><th>ランク</th><th class="num">昇給額</th><th>状況</th></tr>
+    <div class="row filters tabs">${Object.entries(TRACK_LABEL).map(([k, l]) => `<button data-track="${k}" class="${k === track ? 'on' : ''}">${l}（${count(k)}名）</button>`).join('')}</div>
+    <div class="row filters">
+      <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
+      <input id="lkw" placeholder="氏名で検索" value="${esc(kw)}">
+      ${mgr ? '' : `<select id="lrank">${optionsHTML(rankOptions('全ランク'), rk)}</select>`}
+      <select id="lstage">${optionsHTML([['', '全状況'], ...STAGES.map(([s]) => [s, s])], stg)}</select>
+      <span class="muted">${list.length} / ${inTrack.length}名</span></div>
+    ${mgr ? `<p class="muted">管理者：${crit.length}項目・${maxScore(crit)}点満点。事業所の実績・ランクはなく、昇給額は給与改定で決めます。</p>` : ''}
+    <div class="panel scroll"><table id="lt">
+      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th>${mgr ? '' : '<th class="num">KPI</th>'}<th class="num">最終合計</th>${mgr ? '' : '<th>ランク</th><th class="num">昇給額</th>'}<th>状況</th></tr>
       ${list.map((e) => { const f = R.fin[e.id]; return `<tr data-id="${e.id}" style="cursor:pointer">
-        <td>${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(e.grade)}</td>
-        <td class="num">${tot(R.self[e.id]?.scores)}</td><td class="num">${tot(R.prim[e.id]?.scores)}</td><td class="num">${f?.kpi_score ?? kpiFor(e.facility_id) ?? ''}</td>
-        <td class="num"><b>${f?.total ?? ''}</b></td><td><b>${esc(f?.rank)}</b></td><td class="num">${f ? yen(f.up_amount) : ''}</td><td>${stageChip(e.id, R)}</td></tr>`; }).join('')}
+        <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(e.grade)}</td>
+        <td class="num">${tot(R.self[e.id]?.scores)}</td><td class="num">${tot(R.prim[e.id]?.scores)}</td>${mgr ? '' : `<td class="num">${f?.kpi_score ?? kpiFor(e.facility_id) ?? ''}</td>`}
+        <td class="num"><b>${f?.total ?? ''}</b></td>${mgr ? '' : `<td><b>${esc(f?.rank)}</b></td><td class="num">${f ? yen(f.up_amount) : ''}</td>`}<td data-sort="${STAGES.findIndex(([s]) => s === stageLabel(e.id, R))}">${stageChip(e.id, R)}</td></tr>`; }).join('')}
     </table></div>`);
   bindPeriodPicker();
-  $('#fac').onchange = () => { sessionStorage.setItem('fac', $('#fac').value); go('hr-list'); };
+  bindFilters('hr-list', { fac: 'fac', lkw: 'lkw', lrank: 'lrank', lstage: 'lstage' });
+  $$('[data-track]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('ltrack', b.dataset.track); go('hr-list'); }));
+  sortable($('#lt'), `hr-list:${track}`);
   $$('tr[data-id]').forEach((tr) => (tr.onclick = () => evalDetail(tr.dataset.id).catch((e) => toast(e.message, true))));
   const ids = list.map((e) => e.id);
   $('#approveAll').onclick = async () => {
@@ -410,10 +530,10 @@ VIEWS['hr-list'] = async () => {
     await q(sb.from('final_reviews').update({ published: true }).eq('period_id', S.period.id).in('employee_id', t));
     toast('公開しました'); go('hr-list');
   };
-  $('#csv').onclick = () => downloadCSV(`評価一覧_${S.period.name}.csv`, [
-    ['施設', '氏名', '等級', '自己合計', '一次合計', 'KPI点', ...S.criteria.map((c) => `最終:${c.name}`), '最終合計', 'ランク', '昇給額', '承認', '公開'],
+  $('#csv').onclick = () => downloadCSV(`評価一覧_${TRACK_LABEL[track]}_${S.period.name}.csv`, [
+    ['施設', '氏名', '等級', '自己合計', '一次合計', 'KPI点', ...crit.map((c) => `最終:${c.name}`), '最終合計', 'ランク', '昇給額', '承認', '公開'],
     ...list.map((e) => { const f = R.fin[e.id] ?? {}; return [facName(e.facility_id), fullName(e), e.grade, tot(R.self[e.id]?.scores), tot(R.prim[e.id]?.scores),
-      f.kpi_score ?? '', ...S.criteria.map((c) => f.scores?.[c.id] ?? ''), f.total ?? '', f.rank ?? '', f.up_amount ?? '', f.approved_at ? '済' : '', f.published ? '済' : '']; }),
+      f.kpi_score ?? '', ...crit.map((c) => (f.scores?.[c.id] ? pointsOf(c, f.scores[c.id]) : '')), f.total ?? '', f.rank ?? '', f.up_amount ?? '', f.approved_at ? '済' : '', f.published ? '済' : '']; }),
   ]);
 };
 
@@ -427,13 +547,13 @@ const salaryEval = (r, f) => ({
 });
 function evalCell(r, f, editable) {
   const ev = salaryEval(r, f);
-  const ref = f?.rank ? `評価 ${esc(f.rank)} +${yen(f.up_amount)}` : esc(r.legacy_eval);
+  const ref = f?.rank ? `評価 ${esc(f.rank)} +${yen(f.up_amount)}` : f?.total != null ? `管理者評価 ${f.total}点` : esc(r.legacy_eval);
   if (editable) {
     return `<input class="xs" data-k="eval_rank" value="${esc(r.eval_rank)}" placeholder="${esc(f?.rank ?? '')}">
       +<input class="sm" data-k="eval_up" value="${r.eval_up ?? ''}" placeholder="${f?.up_amount ?? ''}" inputmode="numeric">
       <div class="muted" style="font-size:12px">${ref}</div>`;
   }
-  if (!ev.rank && ev.up == null) return esc(r.legacy_eval);
+  if (!ev.rank && ev.up == null) return f?.total != null && !f.rank ? `<span class="muted">${ref}（昇給額は手打ち）</span>` : esc(r.legacy_eval);
   return `<b>${esc(ev.rank)}</b> +${yen(ev.up)}${ev.manual ? ` <span class="chip warn" title="手打ち">手打ち</span><div class="muted" style="font-size:12px">${ref}</div>` : ''}`;
 }
 VIEWS['hr-salary'] = async () => {
@@ -441,26 +561,35 @@ VIEWS['hr-salary'] = async () => {
   const [rows, emps, fins] = await Promise.all([
     q(sb.from('salary_revisions').select('*').eq('period_id', p.id)),
     q(sb.from('employees').select('*').eq('active', true)),
-    q(sb.from('final_reviews').select('employee_id, rank, up_amount, approved_at').eq('period_id', p.id)),
+    q(sb.from('final_reviews').select('employee_id, total, rank, up_amount, approved_at').eq('period_id', p.id)),
   ]);
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const finBy = Object.fromEntries(fins.map((f) => [f.employee_id, f]));
   const fac = Number(sessionStorage.getItem('fac')) || 0;
-  const list = rows.filter((r) => empBy[r.employee_id] && (!fac || empBy[r.employee_id].facility_id === fac))
+  const kw = filterVal('salkw'), rk = filterVal('salrank'), man = filterVal('salman');
+  const inScope = rows.filter((r) => empBy[r.employee_id] && (!fac || empBy[r.employee_id].facility_id === fac));
+  const list = inScope.filter((r) => {
+    const ev = salaryEval(r, finBy[r.employee_id]);
+    return (!kw || fullName(empBy[r.employee_id]).includes(kw)) && (!rk || (ev.rank ?? '-') === rk) && (!man || ev.manual === (man === '1'));
+  })
     .sort((a, b) => (S.facilities.find((f) => f.id === empBy[a.employee_id].facility_id)?.sort ?? 99) - (S.facilities.find((f) => f.id === empBy[b.employee_id].facility_id)?.sort ?? 99));
   const sumB = list.reduce((t, r) => t + monthly(r, 'before'), 0), sumA = list.reduce((t, r) => t + (r.base_after != null ? monthly(r, 'after') : monthly(r, 'before')), 0);
   const editable = p.status !== 'closed';
   const inp = (r, k, cls = 'sm') => editable ? `<input class="${cls}" data-k="${k}" value="${r[k] ?? ''}" ${cls === 'sm' ? 'inputmode="numeric"' : ''}>` : esc(cls === 'sm' ? yen(r[k]) : r[k]);
   render(`
     <div class="row"><h1 class="grow">給与改定</h1>${periodPicker()}
-      <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       ${editable ? '<button id="seed">前期の改定後を取り込む</button><button id="apply">評価ランクの昇給額を反映</button>' : ''}<button id="csv">CSV出力</button></div>
-    <p class="muted">月額計（通勤手当を除く）：改定前 ${yen(sumB)}円 → 改定後 ${yen(sumA)}円（差額 ${yen(sumA - sumB)}円／${sumB ? ((sumA / sumB - 1) * 100).toFixed(2) : 0}%）　${list.length}名</p>
+    <div class="row filters">
+      <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
+      <input id="salkw" placeholder="氏名で検索" value="${esc(kw)}">
+      <select id="salrank">${optionsHTML(rankOptions('全ランク'), rk)}</select>
+      <select id="salman">${optionsHTML([['', '手打ちを含む'], ['1', '手打ちだけ'], ['0', '手打ちを除く']], man)}</select></div>
+    <p class="muted">月額計（通勤手当を除く）：改定前 ${yen(sumB)}円 → 改定後 ${yen(sumA)}円（差額 ${yen(sumA - sumB)}円／${sumB ? ((sumA / sumB - 1) * 100).toFixed(2) : 0}%）　${list.length} / ${inScope.length}名</p>
     <div class="panel scroll"><table id="st">
       <tr><th>施設</th><th>氏名</th><th>等級</th><th>評価</th><th class="num">基本給(前)</th><th class="num">基本給(後)</th>${SALARY_ITEMS.slice(1).map(([, l]) => `<th class="num">${l}(後)</th>`).join('')}<th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">差額</th><th>備考</th>${editable ? '<th></th>' : ''}</tr>
       ${list.map((r) => { const e = empBy[r.employee_id], f = finBy[r.employee_id]; const a = r.base_after != null ? monthly(r, 'after') : null; return `<tr data-id="${r.employee_id}">
-        <td>${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
-        <td style="white-space:nowrap">${evalCell(r, f, editable)}</td>
+        <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
+        <td style="white-space:nowrap" data-sort="${esc(salaryEval(r, f).rank ?? '')}">${evalCell(r, f, editable)}</td>
         <td class="num">${yen(r.base_before)}</td><td class="num">${inp(r, 'base_after')}</td>
         ${SALARY_ITEMS.slice(1).map(([k]) => `<td class="num">${inp(r, `${k}_after`)}</td>`).join('')}
         <td class="num">${yen(monthly(r, 'before'))}</td><td class="num">${a == null ? '' : yen(a)}</td><td class="num">${a == null ? '' : yen(a - monthly(r, 'before'))}</td>
@@ -468,7 +597,8 @@ VIEWS['hr-salary'] = async () => {
     </table></div>
     <p class="muted">固定残業手当は基本給に連動するため、改定後の金額を確認して入力してください。</p>`);
   bindPeriodPicker();
-  $('#fac').onchange = () => { sessionStorage.setItem('fac', $('#fac').value); go('hr-salary'); };
+  bindFilters('hr-salary', { fac: 'fac', salkw: 'salkw', salrank: 'salrank', salman: 'salman' });
+  sortable($('#st'), 'hr-salary');
   $('#csv').onclick = () => downloadCSV(`給与改定_${p.name}.csv`, [
     ['施設', '姓', '名', '等級(前)', '等級(後)', '評価', '昇給額', ...SALARY_ITEMS.flatMap(([, l]) => [`${l}(前)`, `${l}(後)`]), '通勤(前)', '通勤(後)', '月額計(前)', '月額計(後)', '差額', '備考'],
     ...list.map((r) => { const e = empBy[r.employee_id], f = finBy[r.employee_id]; const a = r.base_after != null ? monthly(r, 'after') : ''; return [
@@ -503,7 +633,8 @@ VIEWS['hr-salary'] = async () => {
     toast(`${ins.length}名を取り込みました`); go('hr-salary');
   };
   $('#apply').onclick = async () => {
-    const t = list.filter((r) => (finBy[r.employee_id]?.approved_at || r.eval_up != null) && r.base_before != null);
+    // Managers have no rank, so an approved review alone has no raise to apply; skip them until a raise is typed in.
+    const t = list.filter((r) => (finBy[r.employee_id]?.approved_at || r.eval_up != null) && r.base_before != null && salaryEval(r, finBy[r.employee_id]).up != null);
     if (!t.length) return toast('人事承認済みの評価・手打ちの昇給額がありません', true);
     if (!confirm(`人事承認済み・手打ちの ${t.length}名の基本給(後)を「基本給(前)＋昇給額」で上書きします。`)) return;
     for (const r of t) {
@@ -522,16 +653,26 @@ VIEWS['hr-staff'] = async () => {
   const by = Object.fromEntries(emps.map((e) => [e.id, e]));
   const fac = Number(sessionStorage.getItem('sfac')) || 0;
   const kw = sessionStorage.getItem('skw') ?? '';
-  const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw)))
+  const role = filterVal('srole'), trk = filterVal('strack'), tgt = filterVal('stgt'), act = filterVal('sact'), evf = filterVal('sev');
+  const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw))
+    && (!role || e.role === role) && (!trk || trackOf(e) === trk) && (!tgt || e.eval_target === (tgt === '1')) && (!act || e.active === (act === '1'))
+    && (!evf || (evf === 'none' ? e.eval_target && !links.some((l) => l.employee_id === e.id) : links.some((l) => l.employee_id === e.id && l.evaluator_id === evf))))
     .sort((a, b) => (S.facilities.find((f) => f.id === a.facility_id)?.sort ?? 99) - (S.facilities.find((f) => f.id === b.facility_id)?.sort ?? 99) || Number(b.role !== 'staff') - Number(a.role !== 'staff'));
   const evaluators = emps.filter((e) => e.active && e.role !== 'staff');
   const evOf = (id) => links.filter((l) => l.employee_id === id).map((l) => by[l.evaluator_id]).filter(Boolean);
   const facOpts = (sel) => S.facilities.map((f) => `<option value="${f.id}" ${f.id === sel ? 'selected' : ''}>${esc(f.name)}</option>`).join('');
   const noEmail = emps.filter((e) => e.active && !e.email).length;
   render(`
-    <div class="row"><h1 class="grow">社員・評価者</h1>
+    <div class="row"><h1 class="grow">社員・評価者</h1><button id="csv">CSV出力</button></div>
+    <div class="row filters">
       <select id="sfac"><option value="0">全施設</option>${facOpts(fac)}</select>
-      <input id="skw" placeholder="氏名・メールで検索" value="${esc(kw)}"><button id="csv">CSV出力</button></div>
+      <input id="skw" placeholder="氏名・メールで検索" value="${esc(kw)}">
+      <select id="srole">${optionsHTML([['', '全権限'], ...Object.entries(ROLE_LABEL)], role)}</select>
+      <select id="strack">${optionsHTML([['', '全区分'], ...Object.entries(TRACK_LABEL)], trk)}</select>
+      <select id="stgt">${optionsHTML([['', '評価対象：すべて'], ['1', '評価対象のみ'], ['0', '評価対象外のみ']], tgt)}</select>
+      <select id="sact">${optionsHTML([['', '在籍：すべて'], ['1', '在籍のみ'], ['0', '退職のみ']], act)}</select>
+      <select id="sev">${optionsHTML([['', '評価者：すべて'], ['none', '評価者未設定'], ...evaluators.map((e) => [e.id, fullName(e)])], evf)}</select>
+      <span class="muted">${list.length} / ${emps.length}名</span></div>
     ${noEmail ? `<p class="muted"><span class="chip warn">メール未登録 ${noEmail}名</span>　メールアドレスを登録するとログインできるようになります。</p>` : ''}
     <div class="panel">
       <h2 style="margin-top:0">評価者の一括設定</h2>
@@ -543,13 +684,14 @@ VIEWS['hr-staff'] = async () => {
       <p class="muted">評価者の候補は、権限が「一般」以外の社員です。評価者（1次）は一次評価、評価者（2次）は最終決定を入力します。先に下の一覧で権限を変更してください。</p>
     </div>
     <div class="panel scroll"><table id="et">
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th>メール</th><th>権限</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
       ${list.map((e) => `<tr data-id="${e.id}">
-        <td><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
+        <td data-sort="${facSort(e.facility_id)}"><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
         <td>${esc(fullName(e))}${e.user_id ? ' <span class="chip ok" title="ログイン済み">✓</span>' : ''}</td>
         <td><input class="xs" data-k="grade" value="${esc(e.grade)}"></td>
         <td><input data-k="email" type="email" value="${esc(e.email)}" placeholder="未登録"></td>
-        <td><select data-k="role">${Object.entries(ROLE_LABEL).map(([k, l]) => `<option value="${k}" ${e.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+        <td data-sort="${Object.keys(ROLE_LABEL).indexOf(e.role)}"><select data-k="role">${Object.entries(ROLE_LABEL).map(([k, l]) => `<option value="${k}" ${e.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+        <td data-sort="${Object.keys(TRACK_LABEL).indexOf(trackOf(e))}"><select data-k="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), trackOf(e))}</select></td>
         <td><input type="checkbox" data-k="eval_target" ${e.eval_target ? 'checked' : ''}></td>
         <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}></td>
         <td>${e.eval_target ? (evOf(e.id).map((v) => esc(fullName(v))).join('、') || '<span class="chip ng">未設定</span>') : ''}</td>
@@ -561,10 +703,12 @@ VIEWS['hr-staff'] = async () => {
         <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm">
         <select name="facility_id">${facOpts(fac)}</select><input name="grade" placeholder="等級" class="xs">
         <input name="hire_date" type="date"><input name="email" type="email" placeholder="メールアドレス">
+        <select name="role">${optionsHTML(Object.entries(ROLE_LABEL), 'staff')}</select>
+        <select name="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), 'general')}</select>
         <button class="primary">追加</button></form>
     </div>`);
-  $('#sfac').onchange = () => { sessionStorage.setItem('sfac', $('#sfac').value); go('hr-staff'); };
-  $('#skw').onchange = () => { sessionStorage.setItem('skw', $('#skw').value.trim()); go('hr-staff'); };
+  bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
+  sortable($('#et'), 'hr-staff');
   $$('#et .es').forEach((b) => (b.onclick = async () => {
     const tr = b.closest('tr'); const patch = {};
     $$('[data-k]', tr).forEach((i) => {
@@ -593,8 +737,8 @@ VIEWS['hr-staff'] = async () => {
     await q(sb.from('employees').insert(o));
     toast('追加しました'); go('hr-staff');
   };
-  $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '等級', '入社日', 'メール', '権限', '評価対象', '在籍', '評価者'],
-    ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
+  $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '等級', '入社日', 'メール', '権限', '評価区分', '評価対象', '在籍', '評価者'],
+    ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], TRACK_LABEL[trackOf(e)], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
 };
 
 // ---------- HR: periods & settings ----------
@@ -624,14 +768,17 @@ VIEWS['hr-period'] = async () => {
       </table>
       <button id="ksave" class="primary" style="margin-top:8px">KPIを保存</button>
     </div>
+    ${Object.entries(TRACK_LABEL).map(([trk, label]) => `
     <div class="panel">
-      <h2 style="margin-top:0">評価項目</h2>
-      <table id="ct"><tr><th>#</th><th>項目名</th><th>説明</th><th class="num">倍率</th></tr>
-        ${S.criteria.map((c) => `<tr data-id="${c.id}"><td>${c.sort}</td><td><input data-k="name" value="${esc(c.name)}"></td><td><input data-k="description" value="${esc(c.description)}" style="width:100%"></td><td class="num"><input class="xs" type="number" min="1" data-k="weight" value="${c.weight}"></td></tr>`).join('')}
+      <h2 style="margin-top:0">評価項目（${label}）<span class="muted" style="font-size:13px;font-weight:400">　${maxScore(critOf(trk))}点満点${trk === 'manager' ? '・KPIなし' : `＋KPI ${5 * p.kpi_weight}点`}</span></h2>
+      <table class="ct"><tr><th>#</th><th>項目名</th><th>説明</th><th class="num">${trk === 'manager' ? '配点（5〜1段階）' : '倍率'}</th></tr>
+        ${critOf(trk).map((c) => `<tr data-id="${c.id}"><td>${c.sort}</td><td><input data-k="name" value="${esc(c.name)}"></td><td><input data-k="description" value="${esc(c.description)}" style="width:100%"></td>
+          <td class="num">${trk === 'manager' ? `<input class="sm" data-k="points" value="${(c.points ?? [1, 2, 3, 4, 5].map((n) => n * c.weight)).slice().reverse().join('/')}" title="5段階の点数を高い順に「/」で区切って入力">` : `<input class="xs" type="number" min="1" data-k="weight" value="${c.weight}">`}</td></tr>
+          ${trk === 'manager' ? `<tr data-sub="${c.id}"><td></td><td colspan="3"><div class="row"><input data-k="action_label" class="grow" placeholder="主要アクションの欄（空欄なら欄なし）" value="${esc(c.action_label)}"><input data-k="note" class="grow" placeholder="注意書き（例：※KPIは各事業所の予実管理表にて確認）" value="${esc(c.note)}"></div></td></tr>` : ''}`).join('')}
       </table>
-      <div class="row" style="margin-top:8px"><button id="csave">項目を保存</button><button id="cadd">項目を追加</button>
-        <span class="muted">評価が始まってから項目を変えると、入力済みの点数と合わなくなるので注意してください。</span></div>
-    </div>
+      <div class="row" style="margin-top:8px"><button class="csave">項目を保存</button><button class="cadd" data-track="${trk}">項目を追加</button>
+        <span class="muted">${trk === 'manager' ? '配点は高い順に「20/16/10/4/0」のように入力します。' : ''}評価が始まってから項目を変えると、入力済みの点数と合わなくなるので注意してください。</span></div>
+    </div>`).join('')}
     <div class="panel">
       <h2 style="margin-top:0">新しい期間を作成</h2>
       <form id="nf" class="row"><input name="name" placeholder="例：2027.10～2028.9期" required><input name="starts_on" type="date" required><input name="ends_on" type="date" required>
@@ -658,22 +805,38 @@ VIEWS['hr-period'] = async () => {
     await q(sb.from('facility_kpis').upsert(rows));
     toast('保存しました'); reloadPeriods(p.id);
   };
-  $('#csave').onclick = async () => {
-    for (const tr of $$('#ct tr[data-id]')) {
-      await q(sb.from('criteria').update({ name: $('[data-k=name]', tr).value, description: $('[data-k=description]', tr).value, weight: Number($('[data-k=weight]', tr).value) }).eq('id', tr.dataset.id));
+  // Manager points are typed high to low ("20/16/10/4/0") and stored for levels 1..5.
+  const parsePoints = (s) => {
+    const v = s.split(/[\/,、\s]+/).filter(Boolean).map(Number);
+    return v.length === 5 && v.every((n) => Number.isInteger(n) && n >= 0) ? v.reverse() : null;
+  };
+  $$('.csave').forEach((b) => (b.onclick = async () => {
+    const rows = $$('tr[data-id]', b.closest('.panel'));
+    const bad = rows.find((tr) => $('[data-k=points]', tr) && !parsePoints($('[data-k=points]', tr).value));
+    if (bad) return toast(`${$('[data-k=name]', bad).value}：配点は5つの整数を「/」で区切って入力してください`, true);
+    for (const tr of rows) {
+      const patch = { name: $('[data-k=name]', tr).value, description: $('[data-k=description]', tr).value };
+      if ($('[data-k=points]', tr)) {
+        patch.points = parsePoints($('[data-k=points]', tr).value);
+        const sub = $(`tr[data-sub="${tr.dataset.id}"]`, b.closest('.panel'));
+        patch.action_label = $('[data-k=action_label]', sub).value.trim() || null;
+        patch.note = $('[data-k=note]', sub).value.trim() || null;
+      } else patch.weight = Number($('[data-k=weight]', tr).value);
+      await q(sb.from('criteria').update(patch).eq('id', tr.dataset.id));
     }
     toast('保存しました'); reloadPeriods(p.id);
-  };
-  $('#cadd').onclick = async () => {
+  }));
+  $$('.cadd').forEach((b) => (b.onclick = async () => {
     const name = prompt('追加する項目名'); if (!name) return;
-    await q(sb.from('criteria').insert({ period_id: p.id, name, sort: S.criteria.length + 1 }));
+    const track = b.dataset.track;
+    await q(sb.from('criteria').insert({ period_id: p.id, track, name, sort: critOf(track).length + 1, points: track === 'manager' ? [0, 1, 3, 4, 5] : null }));
     reloadPeriods(p.id);
-  };
+  }));
   $('#nf').onsubmit = async (ev) => {
     ev.preventDefault();
     const o = Object.fromEntries(new FormData(ev.target));
     const np = await q(sb.from('periods').insert({ ...o, status: 'preparing', kpi_weight: p.kpi_weight, rank_rules: p.rank_rules }).select().single());
-    await q(sb.from('criteria').insert(S.criteria.map(({ sort, name, description, weight }) => ({ period_id: np.id, sort, name, description, weight }))));
+    await q(sb.from('criteria').insert(S.criteria.map(({ sort, name, description, weight, track, points, action_label, note }) => ({ period_id: np.id, sort, name, description, weight, track, points, action_label, note }))));
     toast('作成しました'); reloadPeriods(np.id);
   };
 };

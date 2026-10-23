@@ -31,6 +31,12 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
 th { font-size: 12px; color: var(--muted); font-weight: 600; background: #faf9f7; position: sticky; top: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.sort { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sort:hover { color: var(--ink); }
+th.sort[data-dir] { color: var(--accent); }
+.filters { margin-bottom: 12px; }
+.tabs { gap: 4px; }
+.tabs button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .scroll { overflow-x: auto; }
 .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); color: var(--muted); white-space: nowrap; }
 .chip.ok { background: #e3f1e8; color: var(--ok); }
@@ -40,6 +46,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .crit { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .crit .name { font-weight: 600; }
 .crit .desc { font-size: 13px; color: var(--muted); }
+.crit .note { font-size: 12px; }
+.crit .action { grid-column: 1 / -1; }
+.crit .action-text { font-size: 14px; background: #faf9f7; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin-top: 4px; }
 .scale { display: flex; gap: 4px; }
 .scale label { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; user-select: none; }
 .scale input { display: none; }
