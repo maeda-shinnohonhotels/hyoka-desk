@@ -35,6 +35,8 @@ th.sort { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sort:hover { color: var(--ink); }
 th.sort[data-dir] { color: var(--accent); }
 .filters { margin-bottom: 12px; }
+button.re { padding: 3px 9px; }
+tr.editing td { background: #fdf8ef; }
 .tabs { gap: 4px; }
 .tabs button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .scroll { overflow-x: auto; }
