@@ -193,7 +193,8 @@ async function boot() {
   ]);
   const saved = Number(sessionStorage.getItem('period'));
   await setPeriod(S.periods.find((p) => p.id === saved) ?? S.periods.find((p) => p.status !== 'closed' && p.status !== 'preparing') ?? S.periods.find((p) => p.status !== 'closed') ?? S.periods[0]);
-  $('#who').innerHTML = `${esc(fullName(S.me))}（${ROLE_LABEL[S.me.role]}） <button id="logout">ログアウト</button>`;
+  $('#who').innerHTML = `${esc(fullName(S.me))}（${ROLE_LABEL[S.me.role]}） <button id="pwset">パスワード設定</button><button id="logout">ログアウト</button>`;
+  $('#pwset').onclick = () => go('password');
   $('#logout').onclick = logout;
   buildNav();
 }
@@ -265,6 +266,7 @@ function buildNav() {
   go(sessionStorage.getItem('view') && items.some(([k]) => k === sessionStorage.getItem('view')) ? sessionStorage.getItem('view') : items[0][0]);
 }
 function go(view, arg = null) {
+  if (view === 'password' && S.view && S.view !== 'password') sessionStorage.setItem('prevView', S.view);
   S.view = view; S.viewArg = arg;
   sessionStorage.setItem('view', view);
   $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === view));
@@ -281,6 +283,32 @@ function bindPeriodPicker() {
 
 // ---------- views ----------
 const VIEWS = {};
+
+// Any signed-in user can set their own password, so they can use パスワードでログイン next time.
+VIEWS.password = async () => {
+  render(`
+    <h1>パスワード設定</h1>
+    <div class="panel" style="max-width:460px">
+      <p class="muted">次からは、ログイン画面の「パスワードでログイン」で、メールアドレスとこのパスワードでログインできます。</p>
+      <form id="pwf" style="display:flex;flex-direction:column;gap:8px">
+        <input type="email" value="${esc(S.me.email)}" autocomplete="username" readonly hidden>
+        <label class="field">新しいパスワード（8文字以上）<input id="np1" type="password" required minlength="8" autocomplete="new-password"></label>
+        <label class="field">確認のため、もう一度<input id="np2" type="password" required minlength="8" autocomplete="new-password"></label>
+        <div class="row"><button class="primary">保存</button><button type="button" id="pwback">戻る</button></div>
+      </form>
+    </div>`);
+  $('#pwback').onclick = () => go(sessionStorage.getItem('prevView') || 'results');
+  $('#pwf').onsubmit = async (e) => {
+    e.preventDefault();
+    const p1 = $('#np1').value, p2 = $('#np2').value;
+    if (p1 !== p2) return toast('2回入れたパスワードが違います', true);
+    if (p1.length < 8) return toast('パスワードは8文字以上にしてください', true);
+    const { error } = await sb.auth.updateUser({ password: p1 });
+    if (error) return toast(`保存できませんでした：${error.message}`, true);
+    $('#np1').value = $('#np2').value = '';
+    toast('パスワードを保存しました');
+  };
+};
 
 VIEWS.self = async () => {
   const p = S.period;
