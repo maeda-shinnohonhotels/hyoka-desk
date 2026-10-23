@@ -742,18 +742,21 @@ VIEWS['hr-raise'] = async () => {
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const finBy = Object.fromEntries(fins.map((f) => [f.employee_id, f]));
   const trackFor = (r) => scoredTrack(finBy[r.employee_id]?.scores) ?? trackOf(empBy[r.employee_id]);
-  const track = filterVal('ltrack') || 'general';
-  const fac = Number(filterVal('rfac')) || 0, kw = filterVal('rkw'), gr = filterVal('rgrade'), st = filterVal('rstate');
+  // 区分 and 施設 can each be any combination (e.g. 一般＋管理者, 別邸樹＋東匠庵). null = everything ticked.
+  const picked = (key) => { const v = sessionStorage.getItem(key); return v == null ? null : v.split(',').filter(Boolean); };
+  const tracks = picked('rtracks'), facs = picked('rfacs')?.map(Number) ?? null;
+  const has = (sel, v) => !sel || sel.includes(v);
+  const kw = filterVal('rkw'), gr = filterVal('rgrade'), st = filterVal('rstate');
   const valid = rows.filter((r) => empBy[r.employee_id]);
   const count = (t) => valid.filter((r) => trackFor(r) === t).length;
-  const inTrack = valid.filter((r) => trackFor(r) === track);
+  const inTrack = valid.filter((r) => has(tracks, trackFor(r)));
   const gradeOf = (r) => r.grade_after || r.grade_before || '';
   const people = inTrack.map((r) => {
     const e = empBy[r.employee_id], before = monthly(r, 'before'), done = r.base_after != null;
     const after = done ? monthly(r, 'after') : null;
-    return { r, e, before, after, up: done ? after - before : null, baseUp: done ? r.base_after - (r.base_before ?? 0) : null };
+    return { r, e, trk: trackFor(r), before, after, up: done ? after - before : null, baseUp: done ? r.base_after - (r.base_before ?? 0) : null };
   });
-  const list = people.filter(({ r, e, up }) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw)) && (!gr || gradeOf(r) === gr)
+  const list = people.filter(({ r, e, up }) => has(facs, e.facility_id) && (!kw || fullName(e).includes(kw)) && (!gr || gradeOf(r) === gr)
     && (!st || (st === 'none' ? up == null : st === 'zero' ? up === 0 : st === 'up' ? up > 0 : up < 0)))
     .sort((a, b) => facSort(a.e.facility_id) - facSort(b.e.facility_id) || a.e.last_name.localeCompare(b.e.last_name, 'ja'));
   const sum = (arr, k) => arr.reduce((t, x) => t + (x[k] ?? 0), 0);
@@ -767,11 +770,19 @@ VIEWS['hr-raise'] = async () => {
   const byFac = S.facilities.map((f) => ({ f, s: stats(list.filter((x) => x.e.facility_id === f.id)) })).filter((x) => x.s.n);
   const grades = [...new Set(inTrack.map(gradeOf).filter(Boolean))].sort();
   const card = (label, v) => `<div><div class="muted" style="font-size:12px">${label}</div><span class="big" style="font-size:22px">${v}</span></div>`;
+  const chk = (name, v, label, on) => `<label class="chk"><input type="checkbox" name="${name}" value="${v}" ${on ? 'checked' : ''}>${esc(label)}</label>`;
+  const facLabel = !facs || facs.length === S.facilities.length ? '全施設' : facs.length ? facs.map(facName).join('＋') : '（施設を選んでください）';
+  const trackLabel = !tracks || tracks.length === 2 ? '一般＋管理者' : tracks.length ? TRACK_LABEL[tracks[0]] : '（区分を選んでください）';
+  const bothTracks = !tracks || tracks.length > 1;
   render(`
     <div class="row"><h1 class="grow">昇給集計</h1>${periodPicker()}<button id="csv">CSV出力</button></div>
-    <div class="row filters tabs">${Object.entries(TRACK_LABEL).map(([k, l]) => `<button data-track="${k}" class="${k === track ? 'on' : ''}">${l}（${count(k)}名）</button>`).join('')}</div>
+    <div class="panel picks">
+      <div class="row"><b class="pick-h">区分</b>${Object.entries(TRACK_LABEL).map(([k, l]) => chk('rt', k, `${l}（${count(k)}名）`, has(tracks, k))).join('')}</div>
+      <div class="row"><b class="pick-h">施設</b>${S.facilities.map((f) => chk('rf', f.id, f.name, has(facs, f.id))).join('')}
+        <button type="button" id="rfall">すべて選ぶ</button><button type="button" id="rfnone">すべて外す</button></div>
+    </div>
+    <p class="muted">集計の対象：<b>${esc(trackLabel)}</b>　／　<b>${esc(facLabel)}</b></p>
     <div class="row filters">
-      <select id="rfac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="rkw" placeholder="氏名で検索" value="${esc(kw)}">
       <select id="rgrade">${optionsHTML([['', '全等級'], ...grades.map((g) => [g, g])], gr)}</select>
       <select id="rstate">${optionsHTML([['', 'UP額：すべて'], ['up', 'UPあり'], ['zero', 'UPなし（0円）'], ['down', '減額'], ['none', '未入力']], st)}</select>
@@ -791,28 +802,37 @@ VIEWS['hr-raise'] = async () => {
     </table></div>
     <h2>個人別</h2>
     <div class="panel scroll"><table id="rp">
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">基本給(前)</th><th class="num">基本給(後)</th><th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">UP額</th></tr>
-      ${list.map(({ r, e, before, after, up }) => `<tr><td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
-        <td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
+      <tr><th>施設</th><th>氏名</th>${bothTracks ? '<th>区分</th>' : ''}<th>等級</th><th class="num">基本給(前)</th><th class="num">基本給(後)</th><th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">UP額</th></tr>
+      ${list.map(({ r, e, trk, before, after, up }) => `<tr><td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
+        ${bothTracks ? `<td>${TRACK_LABEL[trk]}</td>` : ''}<td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
         <td class="num">${yen(r.base_before)}</td><td class="num">${yen(r.base_after)}</td><td class="num">${yen(before)}</td><td class="num">${after == null ? '' : yen(after)}</td>
         <td class="num" data-sort="${up ?? ''}">${up == null ? '<span class="muted">未入力</span>' : `<b>${yen(up)}</b>`}</td></tr>`).join('')}
     </table></div>`);
   bindPeriodPicker();
-  bindFilters('hr-raise', { rfac: 'rfac', rkw: 'rkw', rgrade: 'rgrade', rstate: 'rstate' });
-  $$('[data-track]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('ltrack', b.dataset.track); go('hr-raise'); }));
+  bindFilters('hr-raise', { rkw: 'rkw', rgrade: 'rgrade', rstate: 'rstate' });
+  // Save the ticked boxes; when every box is ticked, store nothing so a new facility is included too.
+  const savePicks = (name, key) => {
+    const boxes = $$(`input[name="${name}"]`), on = boxes.filter((b) => b.checked).map((b) => b.value);
+    if (on.length === boxes.length) sessionStorage.removeItem(key); else sessionStorage.setItem(key, on.join(','));
+    go('hr-raise');
+  };
+  $$('input[name="rt"]').forEach((b) => (b.onchange = () => savePicks('rt', 'rtracks')));
+  $$('input[name="rf"]').forEach((b) => (b.onchange = () => savePicks('rf', 'rfacs')));
+  $('#rfall').onclick = () => { sessionStorage.removeItem('rfacs'); go('hr-raise'); };
+  $('#rfnone').onclick = () => { sessionStorage.setItem('rfacs', ''); go('hr-raise'); };
   // Keep the 合計 row at the bottom when the facility table is re-sorted.
   const totalRow = $('#rt tr[data-total]'); totalRow.remove();
-  sortable($('#rt'), `hr-raise-fac:${track}`);
+  sortable($('#rt'), 'hr-raise-fac');
   $('#rt').append(totalRow);
   $$('#rt th').forEach((th) => th.addEventListener('click', () => $('#rt').append(totalRow)));
-  sortable($('#rp'), `hr-raise:${track}`);
-  $('#csv').onclick = () => downloadCSV(`昇給集計_${TRACK_LABEL[track]}_${p.name}.csv`, [
+  sortable($('#rp'), `hr-raise:${bothTracks}`);
+  $('#csv').onclick = () => downloadCSV(`昇給集計_${trackLabel}_${facLabel}_${p.name}.csv`, [
     ['施設', '人数', '月額計(前)', '月額計(後)', 'UP額合計', '平均UP額', 'うち基本給', '上昇率(%)', '未入力'],
     ...byFac.map(({ f, s }) => [f.name, s.n, s.before, s.after, s.up, s.avg, s.baseUp, s.rate, s.none]),
     ['合計', all.n, all.before, all.after, all.up, all.avg, all.baseUp, all.rate, all.none],
     [],
-    ['施設', '姓', '名', '等級(前)', '等級(後)', '基本給(前)', '基本給(後)', '月額計(前)', '月額計(後)', 'UP額'],
-    ...list.map(({ r, e, before, after, up }) => [facName(e.facility_id), e.last_name, e.first_name, r.grade_before, r.grade_after, r.base_before, r.base_after, before, after ?? '', up ?? '']),
+    ['施設', '姓', '名', '区分', '等級(前)', '等級(後)', '基本給(前)', '基本給(後)', '月額計(前)', '月額計(後)', 'UP額'],
+    ...list.map(({ r, e, trk, before, after, up }) => [facName(e.facility_id), e.last_name, e.first_name, TRACK_LABEL[trk], r.grade_before, r.grade_after, r.base_before, r.base_after, before, after ?? '', up ?? '']),
   ]);
 };
 
