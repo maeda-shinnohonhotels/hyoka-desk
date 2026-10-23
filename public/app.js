@@ -268,7 +268,7 @@ function buildNav() {
   if (S.me.eval_target) items.push(['self', '自己評価']);
   items.push(['results', '評価結果']);
   if (S.me.role !== 'staff') items.push(['evaluate', '部下の評価']);
-  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-staff', '社員・評価者'], ['hr-period', '期間・設定']);
+  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-staff', '社員・評価者'], ['hr-period', '期間・設定']);
   $('#nav').innerHTML = items.map(([k, l]) => `<button data-v="${k}">${l}</button>`).join('');
   $$('#nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
   go(sessionStorage.getItem('view') && items.some(([k]) => k === sessionStorage.getItem('view')) ? sessionStorage.getItem('view') : items[0][0]);
@@ -728,6 +728,92 @@ VIEWS['hr-salary'] = async () => {
     }
     toast('反映しました'); go('hr-salary');
   };
+};
+
+// ---------- HR: raise summary ----------
+// UP額 = 月額計(後) − 月額計(前)（通勤手当を除く、給与改定と同じ計算）。基本給(後)が未入力の人は「未入力」として合計に入れない。
+VIEWS['hr-raise'] = async () => {
+  const p = S.period;
+  const [rows, emps, fins] = await Promise.all([
+    q(sb.from('salary_revisions').select('*').eq('period_id', p.id)),
+    q(sb.from('employees').select('*').eq('active', true)),
+    q(sb.from('final_reviews').select('employee_id, scores').eq('period_id', p.id)),
+  ]);
+  const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
+  const finBy = Object.fromEntries(fins.map((f) => [f.employee_id, f]));
+  const trackFor = (r) => scoredTrack(finBy[r.employee_id]?.scores) ?? trackOf(empBy[r.employee_id]);
+  const track = filterVal('ltrack') || 'general';
+  const fac = Number(filterVal('rfac')) || 0, kw = filterVal('rkw'), gr = filterVal('rgrade'), st = filterVal('rstate');
+  const valid = rows.filter((r) => empBy[r.employee_id]);
+  const count = (t) => valid.filter((r) => trackFor(r) === t).length;
+  const inTrack = valid.filter((r) => trackFor(r) === track);
+  const gradeOf = (r) => r.grade_after || r.grade_before || '';
+  const people = inTrack.map((r) => {
+    const e = empBy[r.employee_id], before = monthly(r, 'before'), done = r.base_after != null;
+    const after = done ? monthly(r, 'after') : null;
+    return { r, e, before, after, up: done ? after - before : null, baseUp: done ? r.base_after - (r.base_before ?? 0) : null };
+  });
+  const list = people.filter(({ r, e, up }) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw)) && (!gr || gradeOf(r) === gr)
+    && (!st || (st === 'none' ? up == null : st === 'zero' ? up === 0 : st === 'up' ? up > 0 : up < 0)))
+    .sort((a, b) => facSort(a.e.facility_id) - facSort(b.e.facility_id) || a.e.last_name.localeCompare(b.e.last_name, 'ja'));
+  const sum = (arr, k) => arr.reduce((t, x) => t + (x[k] ?? 0), 0);
+  const stats = (arr) => {
+    const done = arr.filter((x) => x.up != null);
+    const b = sum(done, 'before'), a = sum(done, 'after'), u = sum(done, 'up');
+    return { n: arr.length, done: done.length, none: arr.length - done.length, before: b, after: a, up: u, baseUp: sum(done, 'baseUp'),
+      avg: done.length ? Math.round(u / done.length) : 0, rate: b ? ((a / b - 1) * 100).toFixed(2) : '0.00' };
+  };
+  const all = stats(list);
+  const byFac = S.facilities.map((f) => ({ f, s: stats(list.filter((x) => x.e.facility_id === f.id)) })).filter((x) => x.s.n);
+  const grades = [...new Set(inTrack.map(gradeOf).filter(Boolean))].sort();
+  const card = (label, v) => `<div><div class="muted" style="font-size:12px">${label}</div><span class="big" style="font-size:22px">${v}</span></div>`;
+  render(`
+    <div class="row"><h1 class="grow">昇給集計</h1>${periodPicker()}<button id="csv">CSV出力</button></div>
+    <div class="row filters tabs">${Object.entries(TRACK_LABEL).map(([k, l]) => `<button data-track="${k}" class="${k === track ? 'on' : ''}">${l}（${count(k)}名）</button>`).join('')}</div>
+    <div class="row filters">
+      <select id="rfac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
+      <input id="rkw" placeholder="氏名で検索" value="${esc(kw)}">
+      <select id="rgrade">${optionsHTML([['', '全等級'], ...grades.map((g) => [g, g])], gr)}</select>
+      <select id="rstate">${optionsHTML([['', 'UP額：すべて'], ['up', 'UPあり'], ['zero', 'UPなし（0円）'], ['down', '減額'], ['none', '未入力']], st)}</select>
+      <span class="muted">${list.length} / ${inTrack.length}名</span></div>
+    <div class="panel summary">
+      ${card('UP額 合計（月額）', `${yen(all.up)}円`)}${card('平均 UP額', `${yen(all.avg)}円`)}${card('上昇率', `${all.rate}%`)}
+      ${card('月額計 改定前 → 改定後', `${yen(all.before)} → ${yen(all.after)}円`)}${card('うち基本給の UP', `${yen(all.baseUp)}円`)}
+      ${all.none ? card('未入力', `${all.none}名`) : ''}
+    </div>
+    <p class="muted">UP額＝月額計(後)−月額計(前)（通勤手当を除く）。基本給(後)が未入力の人は合計・平均に入れていません。</p>
+    <h2>施設別</h2>
+    <div class="panel scroll"><table id="rt">
+      <tr><th>施設</th><th class="num">人数</th><th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">UP額 合計</th><th class="num">平均 UP額</th><th class="num">うち基本給</th><th class="num">上昇率(%)</th><th class="num">未入力</th></tr>
+      ${byFac.map(({ f, s }) => `<tr><td data-sort="${f.sort}">${esc(f.name)}</td><td class="num">${s.n}</td><td class="num">${yen(s.before)}</td><td class="num">${yen(s.after)}</td>
+        <td class="num"><b>${yen(s.up)}</b></td><td class="num">${yen(s.avg)}</td><td class="num">${yen(s.baseUp)}</td><td class="num">${s.rate}</td><td class="num">${s.none || ''}</td></tr>`).join('')}
+      <tr data-total style="font-weight:600"><td>合計</td><td class="num">${all.n}</td><td class="num">${yen(all.before)}</td><td class="num">${yen(all.after)}</td><td class="num">${yen(all.up)}</td><td class="num">${yen(all.avg)}</td><td class="num">${yen(all.baseUp)}</td><td class="num">${all.rate}</td><td class="num">${all.none || ''}</td></tr>
+    </table></div>
+    <h2>個人別</h2>
+    <div class="panel scroll"><table id="rp">
+      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">基本給(前)</th><th class="num">基本給(後)</th><th class="num">月額計(前)</th><th class="num">月額計(後)</th><th class="num">UP額</th></tr>
+      ${list.map(({ r, e, before, after, up }) => `<tr><td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
+        <td>${esc(r.grade_before)}${r.grade_after && r.grade_after !== r.grade_before ? '→' + esc(r.grade_after) : ''}</td>
+        <td class="num">${yen(r.base_before)}</td><td class="num">${yen(r.base_after)}</td><td class="num">${yen(before)}</td><td class="num">${after == null ? '' : yen(after)}</td>
+        <td class="num" data-sort="${up ?? ''}">${up == null ? '<span class="muted">未入力</span>' : `<b>${yen(up)}</b>`}</td></tr>`).join('')}
+    </table></div>`);
+  bindPeriodPicker();
+  bindFilters('hr-raise', { rfac: 'rfac', rkw: 'rkw', rgrade: 'rgrade', rstate: 'rstate' });
+  $$('[data-track]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('ltrack', b.dataset.track); go('hr-raise'); }));
+  // Keep the 合計 row at the bottom when the facility table is re-sorted.
+  const totalRow = $('#rt tr[data-total]'); totalRow.remove();
+  sortable($('#rt'), `hr-raise-fac:${track}`);
+  $('#rt').append(totalRow);
+  $$('#rt th').forEach((th) => th.addEventListener('click', () => $('#rt').append(totalRow)));
+  sortable($('#rp'), `hr-raise:${track}`);
+  $('#csv').onclick = () => downloadCSV(`昇給集計_${TRACK_LABEL[track]}_${p.name}.csv`, [
+    ['施設', '人数', '月額計(前)', '月額計(後)', 'UP額合計', '平均UP額', 'うち基本給', '上昇率(%)', '未入力'],
+    ...byFac.map(({ f, s }) => [f.name, s.n, s.before, s.after, s.up, s.avg, s.baseUp, s.rate, s.none]),
+    ['合計', all.n, all.before, all.after, all.up, all.avg, all.baseUp, all.rate, all.none],
+    [],
+    ['施設', '姓', '名', '等級(前)', '等級(後)', '基本給(前)', '基本給(後)', '月額計(前)', '月額計(後)', 'UP額'],
+    ...list.map(({ r, e, before, after, up }) => [facName(e.facility_id), e.last_name, e.first_name, r.grade_before, r.grade_after, r.base_before, r.base_after, before, after ?? '', up ?? '']),
+  ]);
 };
 
 // ---------- HR: staff & evaluators ----------
