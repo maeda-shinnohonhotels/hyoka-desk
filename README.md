@@ -7,6 +7,7 @@
 - `public/` … 静的サイト（ビルド不要）。どこに置いても動く。
 - データベース：Supabase プロジェクト `hyoka-desk`（東京リージョン、ref `ulvkofygpbvufpgkrmhm`）
 - ログイン：メールアドレスにログインリンクを送る方式。社員名簿（`employees.email`）に登録されたアドレスだけが使える。
+  - 取締役など、メールを送らずに使ってもらう人は「パスワードでログイン」を使う。人事が Supabase の管理画面（Authentication → Users → Add user → Create new user、Auto Confirm User にチェック）でメールアドレスとパスワードを作り、同じメールアドレスを「社員・評価者」の名簿にも登録する。パスワードは本人に直接伝える。
 
 ## 権限
 

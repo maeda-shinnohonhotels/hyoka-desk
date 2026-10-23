@@ -215,7 +215,13 @@ function showLogin() {
     <p class="muted">登録済みのメールアドレスを入力してください。ログイン用のリンクをお送りします。</p>
     <form id="lf" class="row"><input id="em" type="email" required placeholder="name@example.com" class="grow" autocomplete="email">
     <button class="primary">リンクを送信</button></form>
-    <p id="lmsg" class="muted"></p></div>`);
+    <p id="lmsg" class="muted"></p>
+    <details id="pwbox" style="margin-top:16px"><summary class="muted">パスワードでログイン（人事からパスワードを受け取った方）</summary>
+      <form id="pf" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+        <input id="pem" type="email" required placeholder="メールアドレス" autocomplete="username">
+        <input id="ppw" type="password" required placeholder="パスワード" autocomplete="current-password">
+        <button class="primary">ログイン</button></form>
+      <p id="pmsg" class="muted"></p></details></div>`);
   // A failed login link comes back as #error=...&error_code=...; show it instead of a silent login form.
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.get('error')) {
@@ -231,6 +237,19 @@ function showLogin() {
     const { error } = await sb.auth.signInWithOtp({ email: $('#em').value.trim(), options: { emailRedirectTo: location.origin + location.pathname } });
     btn.disabled = false;
     $('#lmsg').textContent = error ? `送信できませんでした：${error.message}` : 'メールを送信しました。届いたリンクを開いてください（迷惑メールフォルダもご確認ください）。';
+  };
+  // Password login for accounts HR created in Supabase (e.g. directors), so no email has to be sent.
+  $('#pf').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('#pf button'); btn.disabled = true;
+    const { error } = await sb.auth.signInWithPassword({ email: $('#pem').value.trim(), password: $('#ppw').value });
+    btn.disabled = false;
+    if (error) {
+      $('#pmsg').textContent = /invalid/i.test(error.message) ? 'メールアドレスかパスワードが違います。' : `ログインできませんでした：${error.message}`;
+      $('#pmsg').style.color = 'var(--ng)';
+      return;
+    }
+    location.reload();
   };
 }
 
