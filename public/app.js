@@ -561,13 +561,18 @@ VIEWS['hr-salary'] = async () => {
   const [rows, emps, fins] = await Promise.all([
     q(sb.from('salary_revisions').select('*').eq('period_id', p.id)),
     q(sb.from('employees').select('*').eq('active', true)),
-    q(sb.from('final_reviews').select('employee_id, total, rank, up_amount, approved_at').eq('period_id', p.id)),
+    q(sb.from('final_reviews').select('employee_id, scores, total, rank, up_amount, approved_at').eq('period_id', p.id)),
   ]);
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const finBy = Object.fromEntries(fins.map((f) => [f.employee_id, f]));
+  // Same split as 評価一覧: by the items the review was scored on, else the employee's current 評価区分.
+  const trackFor = (r) => scoredTrack(finBy[r.employee_id]?.scores) ?? trackOf(empBy[r.employee_id]);
+  const track = filterVal('ltrack') || 'general', mgr = track === 'manager';
   const fac = Number(sessionStorage.getItem('fac')) || 0;
-  const kw = filterVal('salkw'), rk = filterVal('salrank'), man = filterVal('salman');
-  const inScope = rows.filter((r) => empBy[r.employee_id] && (!fac || empBy[r.employee_id].facility_id === fac));
+  const kw = filterVal('salkw'), rk = mgr ? '' : filterVal('salrank'), man = filterVal('salman');
+  const valid = rows.filter((r) => empBy[r.employee_id]);
+  const count = (t) => valid.filter((r) => trackFor(r) === t).length;
+  const inScope = valid.filter((r) => trackFor(r) === track && (!fac || empBy[r.employee_id].facility_id === fac));
   const list = inScope.filter((r) => {
     const ev = salaryEval(r, finBy[r.employee_id]);
     return (!kw || fullName(empBy[r.employee_id]).includes(kw)) && (!rk || (ev.rank ?? '-') === rk) && (!man || ev.manual === (man === '1'));
@@ -578,11 +583,12 @@ VIEWS['hr-salary'] = async () => {
   const inp = (r, k, cls = 'sm') => editable ? `<input class="${cls}" data-k="${k}" value="${r[k] ?? ''}" ${cls === 'sm' ? 'inputmode="numeric"' : ''}>` : esc(cls === 'sm' ? yen(r[k]) : r[k]);
   render(`
     <div class="row"><h1 class="grow">給与改定</h1>${periodPicker()}
-      ${editable ? '<button id="seed">前期の改定後を取り込む</button><button id="apply">評価ランクの昇給額を反映</button>' : ''}<button id="csv">CSV出力</button></div>
+      ${editable ? `<button id="seed">前期の改定後を取り込む</button><button id="apply">${mgr ? '手打ちの昇給額を反映' : '評価ランクの昇給額を反映'}</button>` : ''}<button id="csv">CSV出力</button></div>
+    <div class="row filters tabs">${Object.entries(TRACK_LABEL).map(([k, l]) => `<button data-track="${k}" class="${k === track ? 'on' : ''}">${l}（${count(k)}名）</button>`).join('')}</div>
     <div class="row filters">
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="salkw" placeholder="氏名で検索" value="${esc(kw)}">
-      <select id="salrank">${optionsHTML(rankOptions('全ランク'), rk)}</select>
+      ${mgr ? '' : `<select id="salrank">${optionsHTML(rankOptions('全ランク'), rk)}</select>`}
       <select id="salman">${optionsHTML([['', '手打ちを含む'], ['1', '手打ちだけ'], ['0', '手打ちを除く']], man)}</select></div>
     <p class="muted">月額計（通勤手当を除く）：改定前 ${yen(sumB)}円 → 改定後 ${yen(sumA)}円（差額 ${yen(sumA - sumB)}円／${sumB ? ((sumA / sumB - 1) * 100).toFixed(2) : 0}%）　${list.length} / ${inScope.length}名</p>
     <div class="panel scroll"><table id="st">
@@ -598,8 +604,9 @@ VIEWS['hr-salary'] = async () => {
     <p class="muted">固定残業手当は基本給に連動するため、改定後の金額を確認して入力してください。</p>`);
   bindPeriodPicker();
   bindFilters('hr-salary', { fac: 'fac', salkw: 'salkw', salrank: 'salrank', salman: 'salman' });
-  sortable($('#st'), 'hr-salary');
-  $('#csv').onclick = () => downloadCSV(`給与改定_${p.name}.csv`, [
+  $$('[data-track]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('ltrack', b.dataset.track); go('hr-salary'); }));
+  sortable($('#st'), `hr-salary:${track}`);
+  $('#csv').onclick = () => downloadCSV(`給与改定_${TRACK_LABEL[track]}_${p.name}.csv`, [
     ['施設', '姓', '名', '等級(前)', '等級(後)', '評価', '昇給額', ...SALARY_ITEMS.flatMap(([, l]) => [`${l}(前)`, `${l}(後)`]), '通勤(前)', '通勤(後)', '月額計(前)', '月額計(後)', '差額', '備考'],
     ...list.map((r) => { const e = empBy[r.employee_id], f = finBy[r.employee_id]; const a = r.base_after != null ? monthly(r, 'after') : ''; return [
       facName(e.facility_id), e.last_name, e.first_name, r.grade_before, r.grade_after, salaryEval(r, f).rank ?? r.legacy_eval ?? '', salaryEval(r, f).up ?? '',
