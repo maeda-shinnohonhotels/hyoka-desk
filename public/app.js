@@ -216,7 +216,14 @@ async function logout() { await sb.auth.signOut(); ['period', 'view'].forEach((k
 
 function showLogin() {
   $('#nav').innerHTML = ''; $('#who').innerHTML = '';
-  render(`<div class="panel login">
+  document.body.classList.add('is-login');
+  render(`<div class="login">
+    <div class="login-hero">
+      <img src="logo.png" alt="" width="72" height="72">
+      <div class="login-en">SHINNIHON HOTELS</div>
+      <div class="login-ja">新日本ホテルズ　評価デスク</div>
+    </div>
+    <div class="panel">
     <h1>ログイン</h1>
     <p class="muted">登録済みのメールアドレスを入力してください。ログイン用のリンクをお送りします。</p>
     <form id="lf" class="row"><input id="em" type="email" required placeholder="name@example.com" class="grow" autocomplete="email">
@@ -227,7 +234,7 @@ function showLogin() {
         <input id="pem" type="email" required placeholder="メールアドレス" autocomplete="username">
         <input id="ppw" type="password" required placeholder="パスワード" autocomplete="current-password">
         <button class="primary">ログイン</button></form>
-      <p id="pmsg" class="muted"></p></details></div>`);
+      <p id="pmsg" class="muted"></p></details></div></div>`);
   // A failed login link comes back as #error=...&error_code=...; show it instead of a silent login form.
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.get('error')) {
