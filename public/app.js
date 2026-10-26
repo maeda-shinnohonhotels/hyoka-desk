@@ -67,7 +67,9 @@ function sortable(table, key) {
   const apply = (st) => {
     ths.forEach((th, i) => { if (i === st?.col) th.dataset.dir = st.dir; else delete th.dataset.dir; th.textContent = th.dataset.label + (i === st?.col ? (st.dir === 'asc' ? ' ▲' : ' ▼') : ''); });
     if (!st) return;
-    const rows = [...table.rows].slice(1);
+    // A row being edited may have a second line (data-sub) that must stay right under it.
+    const rows = [...table.rows].slice(1).filter((r) => r.dataset.sub == null);
+    const subs = [...table.rows].filter((r) => r.dataset.sub != null);
     rows.sort((a, b) => {
       const va = cellVal(a.cells[st.col]), vb = cellVal(b.cells[st.col]);
       if (!va || !vb) return !va - !vb;
@@ -76,6 +78,7 @@ function sortable(table, key) {
       return st.dir === 'asc' ? c : -c;
     });
     head.parentNode.append(...rows);
+    subs.forEach((s) => rows.find((r) => r.dataset.id === s.dataset.sub)?.after(s));
   };
   ths.forEach((th, i) => {
     th.dataset.label = th.textContent;
@@ -554,6 +557,31 @@ VIEWS['hr-list'] = async () => {
     && (!rk || (R.fin[e.id]?.rank ?? '-') === rk) && (!stg || stageLabel(e.id, R) === stg));
   const tot = (s) => (s && Object.keys(s).length ? sumScores(s, crit) : '');
   const count = (t) => emps.filter((e) => trackFor(e) === t).length;
+  // Rows are read-only; HR and directors press ✎ to edit one row (等級, KPI and the final item scores), even after the period is closed.
+  // Total, rank and raise are recalculated by the database from the scores and KPI.
+  const open = S.period.status !== 'closed';
+  const empBy = Object.fromEntries(list.map((e) => [e.id, e]));
+  const finScoresOf = (id) => (Object.keys(R.fin[id]?.scores ?? {}).length ? R.fin[id].scores : R.prim[id]?.scores ?? {});
+  const kpiOf = (e) => R.fin[e.id]?.kpi_score ?? kpiFor(e.facility_id);
+  const cols = mgr ? 8 : 11;
+  const rowHTML = (e, editing = false) => {
+    const f = R.fin[e.id];
+    const main = `<tr data-id="${e.id}" style="cursor:pointer"${editing ? ' class="editing"' : ''}>
+      <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
+      <td>${editing ? `<input class="xs" data-k="grade" value="${esc(e.grade)}">` : esc(e.grade)}</td>
+      <td class="num">${tot(R.self[e.id]?.scores)}</td><td class="num">${tot(R.prim[e.id]?.scores)}</td>
+      ${mgr ? '' : `<td class="num">${editing ? `<input class="xs" data-k="kpi_score" value="${kpiOf(e) ?? ''}" inputmode="numeric">` : kpiOf(e) ?? ''}</td>`}
+      <td class="num"><b class="etot">${f?.total ?? ''}</b></td>${mgr ? '' : `<td><b class="erank">${esc(f?.rank)}</b></td><td class="num eup">${f ? yen(f.up_amount) : ''}</td>`}
+      <td data-sort="${STAGES.findIndex(([s]) => s === stageLabel(e.id, R))}">${stageChip(e.id, R)}</td>
+      <td style="white-space:nowrap">${editing ? '<button class="rs primary">保存</button><button class="rc">取消</button>' : '<button class="re" title="この行を修正">✎</button>'}</td></tr>`;
+    if (!editing) return main;
+    const sc = finScoresOf(e.id);
+    // The final item scores sit on a second line under the row; blank means not scored yet.
+    return main + `<tr class="editing sub" data-sub="${e.id}"><td colspan="${cols}"><div class="row" style="flex-wrap:wrap;gap:8px 16px">
+      <span class="muted">最終評価：</span>${crit.map((c) => `<label style="white-space:nowrap">${esc(c.name)}
+        <select data-c="${c.id}"><option value=""></option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}" ${Number(sc[c.id]) === n ? 'selected' : ''}>${c.points ? `${pointsOf(c, n)}点` : n}</option>`).join('')}</select></label>`).join('')}
+      </div></td></tr>`;
+  };
   render(`
     <div class="row"><h1 class="grow">評価一覧</h1>${periodPicker()}
       <button id="approveAll">提出済みを一括承認</button><button id="publishAll" class="primary">承認済みを一括公開</button><button id="csv">CSV出力</button></div>
@@ -565,18 +593,57 @@ VIEWS['hr-list'] = async () => {
       <select id="lstage">${optionsHTML([['', '全状況'], ...STAGES.map(([s]) => [s, s])], stg)}</select>
       <span class="muted">${list.length} / ${inTrack.length}名</span></div>
     ${mgr ? `<p class="muted">管理者：${crit.length}項目・${maxScore(crit)}点満点。事業所の実績・ランクはなく、昇給額は給与改定で決めます。</p>` : ''}
+    ${open ? '' : '<p class="muted"><span class="chip warn">締め</span>　締めた期です。右端の ✎ で直せますが、保存すると確定済みの評価が変わります。</p>'}
     <div class="panel scroll"><table id="lt">
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th>${mgr ? '' : '<th class="num">KPI</th>'}<th class="num">最終合計</th>${mgr ? '' : '<th>ランク</th><th class="num">昇給額</th>'}<th>状況</th></tr>
-      ${list.map((e) => { const f = R.fin[e.id]; return `<tr data-id="${e.id}" style="cursor:pointer">
-        <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td><td>${esc(e.grade)}</td>
-        <td class="num">${tot(R.self[e.id]?.scores)}</td><td class="num">${tot(R.prim[e.id]?.scores)}</td>${mgr ? '' : `<td class="num">${f?.kpi_score ?? kpiFor(e.facility_id) ?? ''}</td>`}
-        <td class="num"><b>${f?.total ?? ''}</b></td>${mgr ? '' : `<td><b>${esc(f?.rank)}</b></td><td class="num">${f ? yen(f.up_amount) : ''}</td>`}<td data-sort="${STAGES.findIndex(([s]) => s === stageLabel(e.id, R))}">${stageChip(e.id, R)}</td></tr>`; }).join('')}
+      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th>${mgr ? '' : '<th class="num">KPI</th>'}<th class="num">最終合計</th>${mgr ? '' : '<th>ランク</th><th class="num">昇給額</th>'}<th>状況</th><th></th></tr>
+      ${list.map((e) => rowHTML(e)).join('')}
     </table></div>`);
   bindPeriodPicker();
   bindFilters('hr-list', { fac: 'fac', lkw: 'lkw', lrank: 'lrank', lstage: 'lstage' });
   $$('[data-track]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('ltrack', b.dataset.track); go('hr-list'); }));
   sortable($('#lt'), `hr-list:${track}`);
-  $$('tr[data-id]').forEach((tr) => (tr.onclick = () => evalDetail(tr.dataset.id).catch((e) => toast(e.message, true))));
+  // One table-level handler, so rows swapped between view and edit keep working. A plain row click opens the detail.
+  $('#lt').onclick = async (ev) => {
+    const tr = ev.target.closest('tr[data-id], tr[data-sub]'); if (!tr) return;
+    const id = tr.dataset.id ?? tr.dataset.sub, e = empBy[id];
+    const main = $(`#lt tr[data-id="${id}"]`), sub = $(`#lt tr[data-sub="${id}"]`);
+    const b = ev.target.closest('button');
+    if (!b) { if (!main.classList.contains('editing')) evalDetail(id).catch((er) => toast(er.message, true)); return; }
+    const swap = (editing) => { sub?.remove(); main.outerHTML = rowHTML(e, editing); };
+    if (b.classList.contains('re')) {
+      if ($('#lt tr.editing')) return toast('修正中の行を保存するか取消してください', true);
+      swap(true); $(`#lt tr[data-id="${id}"] input`)?.focus();
+    } else if (b.classList.contains('rc')) {
+      swap(false);
+    } else if (b.classList.contains('rs')) {
+      const grade = $('input[data-k="grade"]', main).value.trim();
+      const kpiIn = $('input[data-k="kpi_score"]', main)?.value.trim() ?? '';
+      if (kpiIn !== '' && isNaN(kpiIn)) return toast('KPI点は数字で入力してください', true);
+      const scores = {};
+      $$('select[data-c]', sub).forEach((s) => { if (s.value) scores[s.dataset.c] = Number(s.value); });
+      const f = R.fin[id];
+      if (!open && !confirm('締めた期の評価を変更します。保存しますか？')) return;
+      if (open && f?.approved_at && !confirm('人事承認済みの評価です。保存すると合計・ランクが変わることがあります（給与改定の基本給(後)は自動では変わりません）。保存しますか？')) return;
+      if (grade !== (e.grade ?? '')) await q(sb.from('employees').update({ grade: grade || null }).eq('id', id));
+      // A blank KPI falls back to the facility KPI (compute_final fills it in).
+      const patch = { scores, kpi_score: mgr || kpiIn === '' ? null : Number(kpiIn) };
+      if (f) await q(sb.from('final_reviews').update(patch).eq('period_id', S.period.id).eq('employee_id', id));
+      else if (Object.keys(scores).length) await q(sb.from('final_reviews').insert({ period_id: S.period.id, employee_id: id, ...patch }));
+      toast('保存しました'); go('hr-list');
+    }
+  };
+  // Preview the total and rank while editing; the saved values come from the database.
+  $('#lt').onchange = (ev) => {
+    const tr = ev.target.closest('tr.editing'); if (!tr) return;
+    const id = tr.dataset.id ?? tr.dataset.sub;
+    const main = $(`#lt tr[data-id="${id}"]`), sub = $(`#lt tr[data-sub="${id}"]`);
+    const scores = {};
+    $$('select[data-c]', sub).forEach((s) => { if (s.value) scores[s.dataset.c] = Number(s.value); });
+    const kpi = mgr ? 0 : Number($('input[data-k="kpi_score"]', main)?.value) || 0;
+    const t = sumScores(scores, crit) + kpi * S.period.kpi_weight;
+    $('.etot', main).textContent = t;
+    if (!mgr) { const r = rankOf(t); $('.erank', main).textContent = r?.rank ?? ''; $('.eup', main).textContent = yen(r?.up); }
+  };
   const ids = list.map((e) => e.id);
   $('#approveAll').onclick = async () => {
     const t = ids.filter((id) => R.fin[id]?.submitted_at && !R.fin[id]?.approved_at);
