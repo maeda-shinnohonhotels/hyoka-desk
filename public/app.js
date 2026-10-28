@@ -438,7 +438,9 @@ async function evalDetail(empId) {
   const kpi = mgr ? null : fin.kpi_score ?? kpiFor(emp.facility_id);
   // 1次 enters the primary review, 2次 the final decision; HR and directors can do both.
   const primEditable = (isHR() || (S.me.role === 'evaluator1' && ['self', 'primary'].includes(p.status) && !prim.submitted_at)) && p.status !== 'closed';
-  const finEditable = (isHR() ? !fin.approved_at : S.me.role === 'evaluator2' && ['primary', 'final'].includes(p.status) && !fin.submitted_at) && p.status !== 'closed';
+  // HR and directors can always correct the final decision, even after approval or closing (they are asked to confirm).
+  const finEditable = isHR() || (S.me.role === 'evaluator2' && ['primary', 'final'].includes(p.status) && !fin.submitted_at);
+  const hrFix = isHR() && (fin.approved_at || p.status === 'closed');
   const finScores = Object.keys(fin.scores ?? {}).length ? fin.scores : prim.scores;
   const totalWith = (scores) => sumScores(scores, crit) + (kpi ?? 0) * p.kpi_weight;
   const rankTxt = (t) => (mgr ? '' : rankOf(t)?.rank ?? '');
@@ -469,9 +471,14 @@ async function evalDetail(empId) {
       ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? `<p class="muted">${S.me.role === 'evaluator2' ? '一次評価期間になると入力できます。' : '最終決定は評価者（2次）が入力します。'}</p>` : `
       <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]], crit })}
         <p>${mgr ? `合計 <b id="ftot">${totalWith(finScores)}</b> / ${maxScore(crit)}点<b id="frank"></b>（昇給額は給与改定で決めます）`
-          : `合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankTxt(totalWith(finScores)))}</b>（+${yen(rankOf(totalWith(finScores))?.up)}円）`}</p>
+          : `合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankTxt(totalWith(finScores)))}</b>（+<span id="fup">${yen(rankOf(totalWith(finScores))?.up)}</span>円）`}</p>
+        ${isHR() ? `<div class="row" style="flex-wrap:wrap;gap:8px 16px"><span class="muted">直接入力（空欄は上の計算どおり）：</span>
+          <label>合計 <input id="fmt" class="xs" value="${fin.total_manual ?? ''}" inputmode="numeric"></label>
+          ${mgr ? '' : `<label>ランク <select id="fmr"><option value="">自動</option>${(p.rank_rules ?? []).map((r) => r.rank).sort().map((r) => `<option ${fin.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></label>
+          <label>昇給額 <input id="fmu" class="sm" value="${fin.up_manual ?? ''}" inputmode="numeric"></label>`}</div>` : ''}
         <label class="field">本人へのフィードバック（公開時に本人に表示されます）<textarea id="fc" ${finEditable ? '' : 'disabled'}>${esc(fin.comment)}</textarea></label>
-        ${finEditable ? '<div class="row" style="margin-top:12px"><button type="button" id="fsave">下書き保存</button><button type="button" id="fsub" class="primary">最終評価を提出</button></div>' : ''}
+        ${!finEditable ? '' : hrFix ? `<div class="row" style="margin-top:12px"><span class="grow muted">${p.status === 'closed' ? '締めた期' : '人事承認済み'}の評価です。直すと合計・ランクが変わることがあります。</span><button type="button" id="fsave" class="primary">修正を保存</button></div>`
+          : '<div class="row" style="margin-top:12px"><button type="button" id="fsave">下書き保存</button><button type="button" id="fsub" class="primary">最終評価を提出</button></div>'}
       </form>`}
       ${isHR() ? `<div class="row" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
         <span class="grow muted">人事操作</span>
@@ -486,7 +493,18 @@ async function evalDetail(empId) {
     $(tot).textContent = t; $(rank).textContent = rankTxt(t);
   };
   if ($('#pf')) $('#pf').onchange = () => recalc('p', '#ptot', '#prank');
-  if ($('#ff')) $('#ff').onchange = () => recalc('f', '#ftot', '#frank');
+  // The final total and rank follow the typed-in values when HR entered any, as the database does.
+  const recalcFin = () => {
+    const typed = $('#fmt')?.value.replace(/,/g, '').trim() ?? '';
+    const t = typed !== '' && !isNaN(typed) ? Number(typed) : totalWith(readScores('f', crit));
+    $('#ftot').textContent = t;
+    $('#frank').textContent = mgr ? '' : $('#fmr')?.value || rankTxt(t);
+    if ($('#fup')) {
+      const upIn = $('#fmu')?.value.replace(/,/g, '').trim() ?? '';
+      $('#fup').textContent = yen(upIn !== '' && !isNaN(upIn) ? Number(upIn) : (p.rank_rules ?? []).find((r) => r.rank === $('#frank').textContent)?.up);
+    }
+  };
+  if ($('#ff')) { $('#ff').onchange = recalcFin; recalcFin(); }
   const back = () => evalDetail(empId).catch((e) => toast(e.message, true));
   if (primEditable) {
     const save = async (submit) => {
@@ -504,12 +522,25 @@ async function evalDetail(empId) {
       const scores = readScores('f', crit);
       if (submit && !complete(scores, crit)) return toast('すべての項目を選択してください', true);
       if (submit && !confirm('最終評価を提出します。提出後は人事の承認待ちになります。')) return;
-      await q(sb.from('final_reviews').upsert({ period_id: p.id, employee_id: empId, scores, comment: $('#fc').value,
-        kpi_score: kpi, submitted_at: submit ? new Date().toISOString() : fin.submitted_at ?? null, submitted_by: S.me.id }));
+      const row = { period_id: p.id, employee_id: empId, scores, comment: $('#fc').value,
+        kpi_score: kpi, submitted_at: submit ? new Date().toISOString() : fin.submitted_at ?? null };
+      if (isHR()) {
+        const num = (sel, label) => {
+          const v = $(sel)?.value.replace(/,/g, '').trim() ?? '';
+          if (v !== '' && !/^-?\d+$/.test(v)) throw new Error(`${label}は整数で入力してください`);
+          return v === '' ? null : Number(v);
+        };
+        try { Object.assign(row, { total_manual: num('#fmt', '合計'), rank_manual: $('#fmr')?.value || null, up_manual: num('#fmu', '昇給額') }); }
+        catch (e) { return toast(e.message, true); }
+      }
+      if (hrFix && !confirm(`${p.status === 'closed' ? '締めた期' : '人事承認済み'}の評価を変更します（給与改定の基本給(後)は自動では変わりません）。保存しますか？`)) return;
+      // A correction keeps who submitted it; a normal save records the person entering it.
+      if (!hrFix) row.submitted_by = S.me.id;
+      await q(sb.from('final_reviews').upsert(row));
       toast(submit ? '最終評価を提出しました' : '保存しました'); back();
     };
     $('#fsave').onclick = () => save(false);
-    $('#fsub').onclick = () => save(true);
+    if ($('#fsub')) $('#fsub').onclick = () => save(true);
   }
   const hr = (patch, msg) => async () => {
     await q(sb.from('final_reviews').update(patch).eq('period_id', p.id).eq('employee_id', empId));
