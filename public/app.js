@@ -229,12 +229,19 @@ function showLogin() {
     </div>
     <div class="panel">
     <h1>ログイン</h1>
+    <p class="muted">社員番号と、人事から受け取ったパスワードを入力してください。</p>
+    <form id="nf" style="display:flex;flex-direction:column;gap:8px">
+      <input id="nno" required placeholder="社員番号" autocomplete="username" inputmode="text" autocapitalize="off">
+      <input id="npw" type="password" required placeholder="パスワード" autocomplete="current-password">
+      <button class="primary">ログイン</button></form>
+    <p id="nmsg" class="muted"></p>
+    <details id="embox" style="margin-top:16px"><summary class="muted">メールアドレスでログイン（人事・取締役）</summary>
     <p class="muted">登録済みのメールアドレスを入力してください。ログイン用のリンクをお送りします。</p>
     <form id="lf" class="row"><input id="em" type="email" required placeholder="name@example.com" class="grow" autocomplete="email">
     <button class="primary">リンクを送信</button></form>
     <p id="lmsg" class="muted"></p>
-    <details id="pwbox" style="margin-top:16px"><summary class="muted">パスワードでログイン（人事からパスワードを受け取った方）</summary>
-      <form id="pf" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+      <p class="muted" style="margin-top:12px">パスワードを設定済みの方</p>
+      <form id="pf" style="display:flex;flex-direction:column;gap:8px">
         <input id="pem" type="email" required placeholder="メールアドレス" autocomplete="username">
         <input id="ppw" type="password" required placeholder="パスワード" autocomplete="current-password">
         <button class="primary">ログイン</button></form>
@@ -242,6 +249,7 @@ function showLogin() {
   // A failed login link comes back as #error=...&error_code=...; show it instead of a silent login form.
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.get('error')) {
+    $('#embox').open = true;
     $('#lmsg').textContent = h.get('error_code') === 'otp_expired'
       ? 'ログインリンクの期限が切れているか、すでに使えなくなっています。もう一度「リンクを送信」を押し、届いた最新のメールのリンクを開いてください。'
       : `ログインできませんでした：${h.get('error_description') ?? h.get('error')}`;
@@ -256,6 +264,22 @@ function showLogin() {
     const { error } = await sb.auth.signInWithOtp({ email: $('#em').value.trim(), options: { emailRedirectTo: back } });
     btn.disabled = false;
     $('#lmsg').textContent = error ? `送信できませんでした：${error.message}` : 'メールを送信しました。届いたリンクを開いてください（迷惑メールフォルダもご確認ください）。';
+  };
+  // Staff sign in with 社員番号; the login HR issued for it uses <number>@hyoka-desk.local, which never receives mail.
+  $('#nf').onsubmit = async (e) => {
+    e.preventDefault();
+    const no = $('#nno').value.trim().toLowerCase();
+    if (!/^[a-z0-9_-]{1,30}$/.test(no)) { $('#nmsg').textContent = '社員番号は英数字で入力してください。'; $('#nmsg').style.color = 'var(--ng)'; return; }
+    const btn = $('#nf button'); btn.disabled = true;
+    const { error } = await sb.auth.signInWithPassword({ email: `${no}@hyoka-desk.local`, password: $('#npw').value });
+    btn.disabled = false;
+    if (error) {
+      $('#nmsg').textContent = /invalid/i.test(error.message) ? '社員番号かパスワードが違います。' : `ログインできませんでした：${error.message}`;
+      $('#nmsg').style.color = 'var(--ng)';
+      return;
+    }
+    sessionStorage.setItem('freshLogin', '1');
+    location.reload();
   };
   // Password login for accounts HR created in Supabase (e.g. directors), so no email has to be sent.
   $('#pf').onsubmit = async (e) => {
@@ -309,9 +333,10 @@ VIEWS.password = async () => {
   render(`
     <h1>パスワード設定</h1>
     <div class="panel" style="max-width:460px">
-      <p class="muted">次からは、ログイン画面の「パスワードでログイン」で、メールアドレスとこのパスワードでログインできます。</p>
+      <p class="muted">${S.me.email ? '次からは、ログイン画面の「メールアドレスでログイン」で、メールアドレスとこのパスワードでログインできます。'
+        : `次からは、ログイン画面で社員番号（${esc(S.me.employee_no)}）とこのパスワードでログインできます。`}</p>
       <form id="pwf" style="display:flex;flex-direction:column;gap:8px">
-        <input type="email" value="${esc(S.me.email)}" autocomplete="username" readonly hidden>
+        <input value="${esc(S.me.email ?? S.me.employee_no)}" autocomplete="username" readonly hidden>
         <label class="field">新しいパスワード（8文字以上）<input id="np1" type="password" required minlength="8" autocomplete="new-password"></label>
         <label class="field">確認のため、もう一度<input id="np2" type="password" required minlength="8" autocomplete="new-password"></label>
         <div class="row"><button class="primary">保存</button><button type="button" id="pwback">戻る</button></div>
@@ -985,7 +1010,7 @@ VIEWS['hr-raise'] = async () => {
 };
 
 // ---------- HR: staff & evaluators ----------
-VIEWS['hr-staff'] = async () => {
+VIEWS['hr-staff'] = async (issued) => {
   const [emps, links] = await Promise.all([
     q(sb.from('employees').select('*').order('last_name')),
     q(sb.from('employee_evaluators').select('*')),
@@ -1007,6 +1032,12 @@ VIEWS['hr-staff'] = async () => {
   const plainRoles = Object.entries(ROLE_LABEL).filter(([k]) => !PRIV_ROLES.includes(k));
   render(`
     <div class="row"><h1 class="grow">社員・評価者</h1><button id="csv">CSV出力</button></div>
+    ${issued ? `<div class="panel" style="border-color:var(--accent)">
+      <h2 style="margin-top:0">${esc(issued.name)} さんのログインIDを${issued.reissued ? '再発行' : '発行'}しました</h2>
+      <p>ログイン画面で、次の社員番号と仮パスワードを入れます。<b>手渡しや口頭など安全な方法で</b>本人に伝えてください。ログイン後、右上の「パスワード設定」で自分のパスワードに変えてもらいます。</p>
+      <p>ID（社員番号）：<b>${esc(issued.login_id)}</b><br>仮パスワード：<b style="font-family:monospace;font-size:18px;letter-spacing:1px">${esc(issued.temp_password)}</b> <button id="cppw">コピー</button></p>
+      <p class="muted">この仮パスワードは、この画面を離れると二度と表示されません。</p>
+      <button id="pwdone" class="primary">伝え終わったので閉じる</button></div>` : ''}
     <div class="row filters">
       <select id="sfac"><option value="0">全施設</option>${facOpts(fac)}</select>
       <input id="skw" placeholder="氏名・社員番号・メールで検索" value="${esc(kw)}">
@@ -1027,7 +1058,7 @@ VIEWS['hr-staff'] = async () => {
       <p class="muted">評価者の候補は、権限が「一般」以外の社員です。評価者（1次）は一次評価、評価者（2次）は最終決定を入力します。先に下の一覧で権限を変更してください。</p>
     </div>
     <div class="panel scroll"><table id="et">
-      <tr><th>施設</th><th>氏名</th><th>社員番号</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th>社員番号</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th>ログイン</th><th></th></tr>
       ${list.map((e) => `<tr data-id="${e.id}">
         <td data-sort="${facSort(e.facility_id)}"><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
         <td>${esc(fullName(e))}${e.user_id ? ' <span class="chip ok" title="ログイン済み">✓</span>' : ''}</td>
@@ -1039,6 +1070,7 @@ VIEWS['hr-staff'] = async () => {
         <td><input type="checkbox" data-k="eval_target" ${e.eval_target ? 'checked' : ''}></td>
         <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}${lock(e) ? ' disabled' : ''}></td>
         <td>${e.eval_target ? (evOf(e.id).map((v) => esc(fullName(v))).join('、') || '<span class="chip ng">未設定</span>') : ''}</td>
+        <td style="white-space:nowrap">${lock(e) ? (e.user_id ? '<span class="chip ok">メール</span>' : '') : `<button class="li" title="社員番号と仮パスワードでログインできるようにします">${e.user_id ? 'PW再発行' : 'ID発行'}</button>`}</td>
         <td><button class="es">保存</button></td></tr>`).join('')}
     </table></div>
     <p class="muted">人事・取締役の権限をつける・外すとき、人事・取締役の人のメール・在籍を変えるときは、「<a href="#" id="toroles">権限の申請</a>」から申請し、承認を受けてください。</p>
@@ -1054,6 +1086,21 @@ VIEWS['hr-staff'] = async () => {
     </div>`);
   bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
   $('#toroles').onclick = (ev) => { ev.preventDefault(); go('hr-roles'); };
+  if (issued) {
+    $('#cppw').onclick = () => navigator.clipboard.writeText(issued.temp_password).then(() => toast('コピーしました'));
+    $('#pwdone').onclick = () => go('hr-staff');
+  }
+  // ID発行 / PW再発行: the issue-staff-login Edge Function makes the login (ID = 社員番号) and returns a temporary password once.
+  $$('#et .li').forEach((b) => (b.onclick = async () => {
+    const e = by[b.closest('tr').dataset.id];
+    const typed = $('[data-k=employee_no]', b.closest('tr')).value.trim();
+    if (!e.employee_no || typed !== e.employee_no) return toast('先に社員番号を入れて「保存」してください', true);
+    if (!confirm(e.user_id ? `${fullName(e)} さんのパスワードを再発行します。いまのパスワードは使えなくなります。` : `${fullName(e)} さんに、社員番号 ${e.employee_no} でログインできるIDを発行します。`)) return;
+    b.disabled = true;
+    const { data, error } = await sb.functions.invoke('issue-staff-login', { body: { employee_id: e.id } });
+    if (error) { const msg = await error.context?.json?.().then((j) => j.error).catch(() => null); b.disabled = false; return toast(msg || error.message, true); }
+    go('hr-staff', { name: fullName(e), ...data });
+  }));
   sortable($('#et'), 'hr-staff');
   $$('#et .es').forEach((b) => (b.onclick = async () => {
     const tr = b.closest('tr'); const patch = {};
