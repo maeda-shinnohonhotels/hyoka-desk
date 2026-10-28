@@ -621,9 +621,18 @@ VIEWS['hr-progress'] = async () => {
     <div class="panel scroll"><table>
       <tr><th>施設</th><th class="num">対象</th><th class="num">自己評価</th><th class="num">一次評価</th><th class="num">最終提出</th><th class="num">人事承認</th><th class="num">KPI点</th><th>注意</th></tr>
       ${byFac.map((r) => `<tr><td>${esc(r.f.name)}</td><td class="num">${r.total}</td>${cell(r.self, r.total)}${cell(r.prim, r.total)}${cell(r.fin, r.total)}${cell(r.ok, r.total)}
-        <td class="num">${r.kpi ?? '<span class="chip warn">未設定</span>'}</td><td>${r.noEval ? `<span class="chip ng">評価者未設定 ${r.noEval}名</span>` : ''}</td></tr>`).join('')}
-    </table></div>`);
+        <td class="num"><select data-kf="${r.f.id}" aria-label="${esc(r.f.name)} のKPI点"><option value="">未設定</option>${[1, 2, 3, 4, 5].map((n) => `<option ${r.kpi === n ? 'selected' : ''}>${n}</option>`).join('')}</select></td><td>${r.noEval ? `<span class="chip ng">評価者未設定 ${r.noEval}名</span>` : ''}</td></tr>`).join('')}
+    </table></div>
+    <p class="muted">KPI点は施設ごとにここで選ぶと保存されます（「期間・設定」と同じ値）。提出済みの最終評価のKPI点は変わらないので、直すときは「評価一覧」の ✎ で直してください。</p>`);
   bindPeriodPicker();
+  $$('select[data-kf]').forEach((s) => (s.onchange = async () => {
+    const before = kpiFor(Number(s.dataset.kf));
+    if (S.period.status === 'closed' && !confirm('締めた期のKPI点を変更します。保存しますか？')) { s.value = before ?? ''; return; }
+    // Only kpi_score is sent, so the achievement rate set in 期間・設定 stays as it is.
+    await q(sb.from('facility_kpis').upsert({ period_id: S.period.id, facility_id: Number(s.dataset.kf), kpi_score: s.value === '' ? null : Number(s.value) }));
+    S.kpis = await q(sb.from('facility_kpis').select('*').eq('period_id', S.period.id));
+    toast('KPI点を保存しました');
+  }));
 };
 
 // ---------- HR: list ----------
