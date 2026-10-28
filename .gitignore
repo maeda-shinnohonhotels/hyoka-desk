@@ -5,3 +5,6 @@ Thumbs.db
 # Secrets (the repository is public)
 .env
 .env.*
+
+# Local Claude Code settings
+.claude/
