@@ -278,9 +278,10 @@ function buildNav() {
   if (S.me.eval_target) items.push(['self', '自己評価']);
   items.push(['results', '評価結果']);
   if (S.me.role !== 'staff') items.push(['evaluate', '部下の評価']);
-  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-staff', '社員・評価者'], ['hr-period', '期間・設定']);
+  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-staff', '社員・評価者'], ['hr-roles', '権限の申請'], ['hr-period', '期間・設定']);
   $('#nav').innerHTML = items.map(([k, l]) => `<button data-v="${k}">${l}</button>`).join('');
   $$('#nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
+  if (isHR()) updateRoleBadge();
   go(sessionStorage.getItem('view') && items.some(([k]) => k === sessionStorage.getItem('view')) ? sessionStorage.getItem('view') : items[0][0]);
 }
 function go(view, arg = null) {
@@ -1000,6 +1001,9 @@ VIEWS['hr-staff'] = async () => {
   const evOf = (id) => links.filter((l) => l.employee_id === id).map((l) => by[l.evaluator_id]).filter(Boolean);
   const facOpts = (sel) => S.facilities.map((f) => `<option value="${f.id}" ${f.id === sel ? 'selected' : ''}>${esc(f.name)}</option>`).join('');
   const noEmail = emps.filter((e) => e.active && !e.email).length;
+  // 人事・取締役 rows are locked here: their role, email and 在籍 change only through 権限の申請.
+  const lock = (e) => PRIV_ROLES.includes(e.role);
+  const plainRoles = Object.entries(ROLE_LABEL).filter(([k]) => !PRIV_ROLES.includes(k));
   render(`
     <div class="row"><h1 class="grow">社員・評価者</h1><button id="csv">CSV出力</button></div>
     <div class="row filters">
@@ -1027,33 +1031,34 @@ VIEWS['hr-staff'] = async () => {
         <td data-sort="${facSort(e.facility_id)}"><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
         <td>${esc(fullName(e))}${e.user_id ? ' <span class="chip ok" title="ログイン済み">✓</span>' : ''}</td>
         <td><input class="xs" data-k="grade" value="${esc(e.grade)}"></td>
-        <td><input data-k="email" type="email" value="${esc(e.email)}" placeholder="未登録"></td>
-        <td data-sort="${Object.keys(ROLE_LABEL).indexOf(e.role)}"><select data-k="role">${Object.entries(ROLE_LABEL).map(([k, l]) => `<option value="${k}" ${e.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+        <td><input data-k="email" type="email" value="${esc(e.email)}" placeholder="未登録"${lock(e) ? ' disabled title="人事・取締役のメールは「権限の申請」で変えます"' : ''}></td>
+        <td data-sort="${Object.keys(ROLE_LABEL).indexOf(e.role)}">${lock(e) ? `<b>${ROLE_LABEL[e.role]}</b>` : `<select data-k="role">${optionsHTML(plainRoles, e.role)}</select>`}</td>
         <td data-sort="${Object.keys(TRACK_LABEL).indexOf(trackOf(e))}"><select data-k="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), trackOf(e))}</select></td>
         <td><input type="checkbox" data-k="eval_target" ${e.eval_target ? 'checked' : ''}></td>
-        <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}></td>
+        <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}${lock(e) ? ' disabled' : ''}></td>
         <td>${e.eval_target ? (evOf(e.id).map((v) => esc(fullName(v))).join('、') || '<span class="chip ng">未設定</span>') : ''}</td>
         <td><button class="es">保存</button></td></tr>`).join('')}
     </table></div>
+    <p class="muted">人事・取締役の権限をつける・外すとき、人事・取締役の人のメール・在籍を変えるときは、「<a href="#" id="toroles">権限の申請</a>」から申請し、承認を受けてください。</p>
     <div class="panel">
       <h2 style="margin-top:0">社員を追加</h2>
       <form id="af" class="row">
         <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm">
         <select name="facility_id">${facOpts(fac)}</select><input name="grade" placeholder="等級" class="xs">
         <input name="hire_date" type="date"><input name="email" type="email" placeholder="メールアドレス">
-        <select name="role">${optionsHTML(Object.entries(ROLE_LABEL), 'staff')}</select>
+        <select name="role">${optionsHTML(plainRoles, 'staff')}</select>
         <select name="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), 'general')}</select>
         <button class="primary">追加</button></form>
     </div>`);
   bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
+  $('#toroles').onclick = (ev) => { ev.preventDefault(); go('hr-roles'); };
   sortable($('#et'), 'hr-staff');
   $$('#et .es').forEach((b) => (b.onclick = async () => {
     const tr = b.closest('tr'); const patch = {};
-    $$('[data-k]', tr).forEach((i) => {
+    $$('[data-k]:not(:disabled)', tr).forEach((i) => {
       const k = i.dataset.k;
       patch[k] = i.type === 'checkbox' ? i.checked : k === 'facility_id' ? Number(i.value) : i.value.trim() || null;
     });
-    if (tr.dataset.id === S.me.id && !HR_ROLES.includes(patch.role) && !confirm('自分の人事権限を外すと、この画面に戻れなくなります。続けますか？')) return;
     await q(sb.from('employees').update(patch).eq('id', tr.dataset.id));
     toast('保存しました'); go('hr-staff');
   }));
@@ -1077,6 +1082,114 @@ VIEWS['hr-staff'] = async () => {
   };
   $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '等級', '入社日', 'メール', '権限', '評価区分', '評価対象', '在籍', '評価者'],
     ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], TRACK_LABEL[trackOf(e)], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
+};
+
+// ---------- HR: role requests ----------
+// Granting or removing 人事/取締役 is requested here and takes effect only when the approver approves it.
+// The database refuses direct changes; approval runs in the approve-role-request Edge Function,
+// which also creates the login with a temporary password when the person has none.
+const PRIV_ROLES = ['hr', 'director'];
+const REQ_STATUS = { pending: ['承認待ち', 'warn'], approved: ['承認', 'ok'], rejected: ['却下', 'ng'], cancelled: ['取り下げ', ''] };
+async function updateRoleBadge() {
+  const { count } = await sb.from('role_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+  const b = $('#nav button[data-v="hr-roles"]');
+  if (b) b.textContent = count ? `権限の申請（${count}）` : '権限の申請';
+}
+VIEWS['hr-roles'] = async (shown) => {
+  const [emps, reqs] = await Promise.all([
+    q(sb.from('employees').select('*').order('last_name')),
+    q(sb.from('role_requests').select('*').order('requested_at', { ascending: false }).limit(200)),
+  ]);
+  const by = Object.fromEntries(emps.map((e) => [e.id, e]));
+  const approver = emps.find((e) => e.is_approver);
+  const iApprove = !!S.me.is_approver;
+  const pending = reqs.filter((r) => r.status === 'pending'), done = reqs.filter((r) => r.status !== 'pending');
+  const active = emps.filter((e) => e.active || PRIV_ROLES.includes(e.role))
+    .sort((a, b) => facSort(a.facility_id) - facSort(b.facility_id) || a.last_name.localeCompare(b.last_name, 'ja'));
+  const roleTxt = (r) => ROLE_LABEL[r] ?? r;
+  const reqRow = (r, actions) => `<tr data-id="${r.id}">
+    <td>${new Date(r.requested_at).toLocaleString('ja-JP')}</td>
+    <td>${esc(fullName(by[r.employee_id]))}<div class="muted" style="font-size:12px">${esc(facName(by[r.employee_id]?.facility_id))}</div></td>
+    <td style="white-space:nowrap">${roleTxt(r.role_from)} → <b>${roleTxt(r.role_to)}</b></td>
+    <td>${esc(r.email)}</td><td>${esc(r.reason)}</td><td>${esc(fullName(by[r.requested_by]))}</td>
+    ${actions ? `<td style="white-space:nowrap">${actions(r)}</td>` : `<td><span class="chip ${REQ_STATUS[r.status][1]}">${REQ_STATUS[r.status][0]}</span>
+      <div class="muted" style="font-size:12px">${r.decided_at ? `${esc(fullName(by[r.decided_by]))} ${new Date(r.decided_at).toLocaleDateString('ja-JP')}` : ''}${r.decision_note ? `<br>${esc(r.decision_note)}` : ''}</div></td>`}</tr>`;
+  const head = (last) => `<tr><th>申請日時</th><th>社員</th><th>権限</th><th>メール</th><th>理由</th><th>申請者</th><th>${last}</th></tr>`;
+  render(`
+    <div class="row"><h1 class="grow">権限の申請</h1></div>
+    <p class="muted">人事・取締役の権限をつける・外すときは、ここから申請します。承認者（${esc(fullName(approver)) || '未設定'}）が承認すると反映されます。
+      それ以外の権限（一般・評価者）は「社員・評価者」の画面で直接変えられます。</p>
+    ${shown ? `<div class="panel" style="border-color:var(--accent)">
+      <h2 style="margin-top:0">ログイン用アカウントを作りました</h2>
+      <p>${esc(shown.name)} さんに、次のメールアドレスと仮パスワードを<b>口頭や手渡しなど安全な方法で</b>伝えてください。ログイン後、右上の「パスワード設定」で自分のパスワードに変えてもらいます。</p>
+      <p>メール：<b>${esc(shown.email)}</b><br>仮パスワード：<b style="font-family:monospace;font-size:18px;letter-spacing:1px">${esc(shown.password)}</b> <button id="cppw">コピー</button></p>
+      <p class="muted">この仮パスワードは、この画面を離れると二度と表示されません。</p>
+      <button id="pwdone" class="primary">伝え終わったので閉じる</button></div>` : ''}
+    <div class="panel">
+      <h2 style="margin-top:0">申請する</h2>
+      <form id="rf" style="display:flex;flex-direction:column;gap:8px;max-width:560px">
+        <label class="field">社員<select id="remp" required><option value="">選んでください</option>${active.map((e) =>
+          `<option value="${e.id}">${esc(facName(e.facility_id))}　${esc(fullName(e))}（${roleTxt(e.role)}）</option>`).join('')}</select></label>
+        <label class="field">変更後の権限<select id="rrole" required></select></label>
+        <label class="field">メールアドレス（人事・取締役にするとき。ログインに使います）<input id="remail" type="email" autocomplete="off"></label>
+        <label class="field">理由<textarea id="rreason" rows="2" placeholder="例：4月から人事部に異動のため"></textarea></label>
+        <div><button class="primary">申請する</button></div>
+      </form>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">承認待ち（${pending.length}件）</h2>
+      ${pending.length ? `<div class="scroll"><table id="pt">${head('')}${pending.map((r) => reqRow(r, (x) =>
+        (iApprove ? '<button class="rok primary">承認</button><button class="rng danger">却下</button>' : '')
+        + (iApprove || x.requested_by === S.me.id ? '<button class="rcx">取り下げ</button>' : ''))).join('')}</table></div>`
+        : '<p class="muted">承認待ちの申請はありません。</p>'}
+      ${iApprove ? '' : '<p class="muted">承認・却下は承認者だけができます。</p>'}
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">これまでの申請</h2>
+      ${done.length ? `<div class="scroll"><table>${head('結果')}${done.map((r) => reqRow(r)).join('')}</table></div>` : '<p class="muted">まだありません。</p>'}
+    </div>`);
+  updateRoleBadge();
+  if (shown) {
+    $('#cppw').onclick = () => navigator.clipboard.writeText(shown.password).then(() => toast('コピーしました'));
+    $('#pwdone').onclick = () => go('hr-roles');
+  }
+  // The role choices depend on the chosen employee: only changes that involve 人事/取締役 are requested here.
+  const fillRoles = () => {
+    const e = by[$('#remp').value];
+    const opts = !e ? [] : Object.entries(ROLE_LABEL).filter(([k]) => k !== e.role && (PRIV_ROLES.includes(k) || PRIV_ROLES.includes(e.role)));
+    $('#rrole').innerHTML = optionsHTML([['', e ? '選んでください' : '先に社員を選んでください'], ...opts], '');
+    $('#remail').value = e?.email ?? '';
+  };
+  $('#remp').onchange = fillRoles; fillRoles();
+  $('#rf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const e = by[$('#remp').value], role = $('#rrole').value, email = $('#remail').value.trim();
+    if (!e || !role) return toast('社員と変更後の権限を選んでください', true);
+    if (PRIV_ROLES.includes(role) && !email) return toast('人事・取締役にするときはメールアドレスを入れてください', true);
+    if (!confirm(`${fullName(e)} さんを「${roleTxt(e.role)}」から「${roleTxt(role)}」に変える申請を出します。`)) return;
+    await q(sb.rpc('request_role_change', { p_employee: e.id, p_role: role, p_email: email || null, p_reason: $('#rreason').value }));
+    toast('申請しました。承認されると反映されます'); go('hr-roles');
+  };
+  if (!$('#pt')) return;
+  $('#pt').onclick = async (ev) => {
+    const b = ev.target.closest('button'); if (!b) return;
+    const r = pending.find((x) => String(x.id) === b.closest('tr').dataset.id), e = by[r.employee_id];
+    if (b.classList.contains('rcx')) {
+      if (!confirm('この申請を取り下げます。')) return;
+      await q(sb.rpc('cancel_role_request', { p_id: r.id }));
+      return go('hr-roles');
+    }
+    const approve = b.classList.contains('rok');
+    const note = approve ? '' : prompt('却下の理由（申請者に表示されます。空欄でも可）');
+    if (note === null) return;
+    if (approve && !confirm(`${fullName(e)} さんを「${roleTxt(r.role_to)}」にします。${PRIV_ROLES.includes(r.role_to) && !e.user_id ? 'ログイン用アカウントも作ります。' : ''}承認しますか？`)) return;
+    b.disabled = true;
+    const { data, error } = await sb.functions.invoke('approve-role-request', { body: { request_id: r.id, approve, note } });
+    // A refusal comes back as an error whose body holds the message.
+    if (error) { const msg = await error.context?.json?.().then((j) => j.error).catch(() => null); b.disabled = false; return toast(msg || error.message, true); }
+    toast(approve ? '承認しました' : '却下しました');
+    go('hr-roles', data?.temp_password ? { name: fullName(e), email: data.email, password: data.temp_password } : null);
+  };
 };
 
 // ---------- HR: periods & settings ----------
