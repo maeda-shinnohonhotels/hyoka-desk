@@ -380,8 +380,8 @@ async function loadReviews(ids) {
   const p = S.period.id;
   const chunk = (tbl, cols) => ids.length ? q(sb.from(tbl).select(cols).eq('period_id', p).in('employee_id', ids)) : [];
   const [self, prim, fin] = await Promise.all([
-    chunk('self_reviews', 'employee_id, scores, actions, comment, submitted_at'),
-    chunk('primary_reviews', 'employee_id, scores, comment, interview_note, submitted_at'),
+    chunk('self_reviews', 'employee_id, scores, actions, comment, total_manual, submitted_at'),
+    chunk('primary_reviews', 'employee_id, scores, comment, interview_note, total_manual, submitted_at'),
     chunk('final_reviews', '*'),
   ]);
   const by = (arr) => Object.fromEntries(arr.map((r) => [r.employee_id, r]));
@@ -422,6 +422,12 @@ VIEWS.evaluate = async (empId) => {
   $$('.card').forEach((c) => (c.onclick = () => go('evaluate', c.dataset.id)));
 };
 
+// Values HR typed in on 評価一覧 replace the calculated ones; say so on the detail screen.
+function manualNote(vals) {
+  const set = Object.entries(vals).filter(([, v]) => v != null);
+  if (!set.length) return '';
+  return `<p class="muted"><span class="chip warn">手入力</span>　人事が評価一覧で入力：${set.map(([k, v]) => `${k} <b>${esc(v)}</b>`).join('　')}（下の計算より優先）</p>`;
+}
 async function evalDetail(empId) {
   const p = S.period;
   const emp = await q(sb.from('employees').select('*').eq('id', empId).single());
@@ -443,10 +449,12 @@ async function evalDetail(empId) {
     ${rubricHTML(track)}
     <div class="panel">
       <h2 style="margin-top:0">本人の自己評価 ${self.submitted_at ? '<span class="chip ok">提出済み</span>' : '<span class="chip">未提出</span>'}</h2>
+      ${manualNote({ 合計: self.total_manual })}
       ${self.comment ? `<p>${esc(self.comment).replace(/\n/g, '<br>')}</p>` : '<p class="muted">コメントなし</p>'}
     </div>
     <div class="panel">
       <h2 style="margin-top:0">一次評価 ${prim.submitted_at ? '<span class="chip ok">提出済み</span>' : ''}</h2>
+      ${manualNote({ 合計: prim.total_manual })}
       <form id="pf">${criteriaForm('p', prim.scores, { readonly: !primEditable, refs: [['自己', self.scores]], crit, actions: crit.some((c) => c.action_label) ? self.actions ?? {} : null })}
         <p>${mgr ? `見込み合計 <b id="ptot">${totalWith(prim.scores)}</b> / ${maxScore(crit)}点<b id="prank"></b>`
           : `事業所の実績・成果：<b>${kpi ?? '未設定'}</b> ×${p.kpi_weight}　／　見込み合計 <b id="ptot">${totalWith(prim.scores)}</b>点 → <b id="prank">${esc(rankTxt(totalWith(prim.scores)))}</b>`}</p>
@@ -457,6 +465,7 @@ async function evalDetail(empId) {
     </div>
     <div class="panel">
       <h2 style="margin-top:0">最終決定（面談後） ${fin.submitted_at ? '<span class="chip ok">提出済み</span>' : ''}</h2>
+      ${manualNote({ 合計: fin.total_manual, ランク: fin.rank_manual, 昇給額: fin.up_manual == null ? null : `${yen(fin.up_manual)}円` })}
       ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? `<p class="muted">${S.me.role === 'evaluator2' ? '一次評価期間になると入力できます。' : '最終決定は評価者（2次）が入力します。'}</p>` : `
       <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]], crit })}
         <p>${mgr ? `合計 <b id="ftot">${totalWith(finScores)}</b> / ${maxScore(crit)}点<b id="frank"></b>（昇給額は給与改定で決めます）`
@@ -556,22 +565,33 @@ VIEWS['hr-list'] = async () => {
   const list = inTrack.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw))
     && (!rk || (R.fin[e.id]?.rank ?? '-') === rk) && (!stg || stageLabel(e.id, R) === stg));
   const tot = (s) => (s && Object.keys(s).length ? sumScores(s, crit) : '');
+  // A total HR typed in (total_manual) wins over the sum of the items.
+  const totOf = (r) => r?.total_manual ?? tot(r?.scores);
   const count = (t) => emps.filter((e) => trackFor(e) === t).length;
-  // Rows are read-only; HR and directors press ✎ to edit one row (等級, KPI and the final item scores), even after the period is closed.
-  // Total, rank and raise are recalculated by the database from the scores and KPI.
+  // Rows are read-only; HR and directors press ✎ to edit one row, even after the period is closed:
+  // 等級, KPI, the final item scores, and typed-in 自己/一次/最終合計, ランク and 昇給額 (blank = calculated).
+  // The database recalculates the final total, rank and raise, using the typed-in values where given.
   const open = S.period.status !== 'closed';
   const empBy = Object.fromEntries(list.map((e) => [e.id, e]));
   const finScoresOf = (id) => (Object.keys(R.fin[id]?.scores ?? {}).length ? R.fin[id].scores : R.prim[id]?.scores ?? {});
   const kpiOf = (e) => R.fin[e.id]?.kpi_score ?? kpiFor(e.facility_id);
   const cols = mgr ? 8 : 11;
+  const manualChip = (on) => (on ? ' <span class="chip warn" title="人事が直接入力">手入力</span>' : '');
+  const numIn = (k, v, ph) => `<input class="xs" data-k="${k}" value="${v ?? ''}" placeholder="${esc(ph ?? '')}" inputmode="numeric">`;
   const rowHTML = (e, editing = false) => {
-    const f = R.fin[e.id];
+    const f = R.fin[e.id], s = R.self[e.id], pr = R.prim[e.id];
+    const calcTotal = sumScores(finScoresOf(e.id), crit) + (mgr ? 0 : kpiOf(e) ?? 0) * S.period.kpi_weight;
+    const autoRank = mgr ? null : rankOf(f?.total_manual ?? calcTotal);
     const main = `<tr data-id="${e.id}" style="cursor:pointer"${editing ? ' class="editing"' : ''}>
       <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
       <td>${editing ? `<input class="xs" data-k="grade" value="${esc(e.grade)}">` : esc(e.grade)}</td>
-      <td class="num">${tot(R.self[e.id]?.scores)}</td><td class="num">${tot(R.prim[e.id]?.scores)}</td>
+      <td class="num" data-sort="${totOf(s)}">${editing ? numIn('self_total', s?.total_manual, tot(s?.scores)) : `${totOf(s)}${manualChip(s?.total_manual != null)}`}</td>
+      <td class="num" data-sort="${totOf(pr)}">${editing ? numIn('prim_total', pr?.total_manual, tot(pr?.scores)) : `${totOf(pr)}${manualChip(pr?.total_manual != null)}`}</td>
       ${mgr ? '' : `<td class="num">${editing ? `<input class="xs" data-k="kpi_score" value="${kpiOf(e) ?? ''}" inputmode="numeric">` : kpiOf(e) ?? ''}</td>`}
-      <td class="num"><b class="etot">${f?.total ?? ''}</b></td>${mgr ? '' : `<td><b class="erank">${esc(f?.rank)}</b></td><td class="num eup">${f ? yen(f.up_amount) : ''}</td>`}
+      <td class="num" data-sort="${f?.total ?? ''}">${editing ? numIn('total_manual', f?.total_manual, calcTotal) : `<b>${f?.total ?? ''}</b>${manualChip(f?.total_manual != null)}`}</td>
+      ${mgr ? '' : `<td data-sort="${esc(f?.rank ?? '')}">${editing ? `<select data-k="rank_manual"><option value="">自動（${esc(autoRank?.rank ?? '–')}）</option>${(S.period.rank_rules ?? []).map((r) => r.rank).sort()
+        .map((r) => `<option ${f?.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>` : `<b>${esc(f?.rank)}</b>${manualChip(f?.rank_manual != null)}`}</td>
+      <td class="num" data-sort="${f?.up_amount ?? ''}">${editing ? numIn('up_manual', f?.up_manual, (S.period.rank_rules ?? []).find((r) => r.rank === f?.rank_manual)?.up ?? autoRank?.up) : `${f ? yen(f.up_amount) : ''}${manualChip(f?.up_manual != null)}`}</td>`}
       <td data-sort="${STAGES.findIndex(([s]) => s === stageLabel(e.id, R))}">${stageChip(e.id, R)}</td>
       <td style="white-space:nowrap">${editing ? '<button class="rs primary">保存</button><button class="rc">取消</button>' : '<button class="re" title="この行を修正">✎</button>'}</td></tr>`;
     if (!editing) return main;
@@ -617,18 +637,30 @@ VIEWS['hr-list'] = async () => {
       swap(false);
     } else if (b.classList.contains('rs')) {
       const grade = $('input[data-k="grade"]', main).value.trim();
-      const kpiIn = $('input[data-k="kpi_score"]', main)?.value.trim() ?? '';
-      if (kpiIn !== '' && isNaN(kpiIn)) return toast('KPI点は数字で入力してください', true);
+      // Blank number fields mean "use the calculated value".
+      const nums = {};
+      for (const [k, label] of [['kpi_score', 'KPI点'], ['self_total', '自己'], ['prim_total', '一次'], ['total_manual', '最終合計'], ['up_manual', '昇給額']]) {
+        const v = $(`input[data-k="${k}"]`, main)?.value.replace(/,/g, '').trim() ?? '';
+        if (v !== '' && !/^-?\d+$/.test(v)) return toast(`${label}は整数で入力してください`, true);
+        nums[k] = v === '' ? null : Number(v);
+      }
+      const rankIn = $('select[data-k="rank_manual"]', main)?.value || null;
       const scores = {};
       $$('select[data-c]', sub).forEach((s) => { if (s.value) scores[s.dataset.c] = Number(s.value); });
       const f = R.fin[id];
       if (!open && !confirm('締めた期の評価を変更します。保存しますか？')) return;
       if (open && f?.approved_at && !confirm('人事承認済みの評価です。保存すると合計・ランクが変わることがあります（給与改定の基本給(後)は自動では変わりません）。保存しますか？')) return;
       if (grade !== (e.grade ?? '')) await q(sb.from('employees').update({ grade: grade || null }).eq('id', id));
+      // Typed-in 自己/一次 totals are only written when they changed, so no empty review rows are created otherwise.
+      for (const [tbl, k, r] of [['self_reviews', 'self_total', R.self[id]], ['primary_reviews', 'prim_total', R.prim[id]]]) {
+        if (nums[k] !== (r?.total_manual ?? null)) await q(sb.from(tbl).upsert({ period_id: S.period.id, employee_id: id, total_manual: nums[k] }));
+      }
       // A blank KPI falls back to the facility KPI (compute_final fills it in).
-      const patch = { scores, kpi_score: mgr || kpiIn === '' ? null : Number(kpiIn) };
+      const patch = { scores, kpi_score: mgr ? null : nums.kpi_score, total_manual: nums.total_manual, rank_manual: mgr ? null : rankIn, up_manual: mgr ? null : nums.up_manual };
       if (f) await q(sb.from('final_reviews').update(patch).eq('period_id', S.period.id).eq('employee_id', id));
-      else if (Object.keys(scores).length) await q(sb.from('final_reviews').insert({ period_id: S.period.id, employee_id: id, ...patch }));
+      else if (Object.keys(scores).length || patch.total_manual != null || patch.rank_manual || patch.up_manual != null) {
+        await q(sb.from('final_reviews').insert({ period_id: S.period.id, employee_id: id, ...patch }));
+      }
       toast('保存しました'); go('hr-list');
     }
   };
@@ -640,10 +672,18 @@ VIEWS['hr-list'] = async () => {
     const scores = {};
     $$('select[data-c]', sub).forEach((s) => { if (s.value) scores[s.dataset.c] = Number(s.value); });
     const kpi = mgr ? 0 : Number($('input[data-k="kpi_score"]', main)?.value) || 0;
-    const t = sumScores(scores, crit) + kpi * S.period.kpi_weight;
-    $('.etot', main).textContent = t;
-    if (!mgr) { const r = rankOf(t); $('.erank', main).textContent = r?.rank ?? ''; $('.eup', main).textContent = yen(r?.up); }
+    const calc = sumScores(scores, crit) + kpi * S.period.kpi_weight;
+    const totIn = $('input[data-k="total_manual"]', main);
+    totIn.placeholder = calc;
+    if (mgr) return;
+    // The placeholders show what a blank field will become.
+    const typed = totIn.value.replace(/,/g, '').trim();
+    const auto = rankOf(typed !== '' && !isNaN(typed) ? Number(typed) : calc);
+    const sel = $('select[data-k="rank_manual"]', main);
+    sel.options[0].textContent = `自動（${auto?.rank ?? '–'}）`;
+    $('input[data-k="up_manual"]', main).placeholder = (S.period.rank_rules ?? []).find((r) => r.rank === sel.value)?.up ?? auto?.up ?? '';
   };
+  $('#lt').oninput = $('#lt').onchange;
   const ids = list.map((e) => e.id);
   $('#approveAll').onclick = async () => {
     const t = ids.filter((id) => R.fin[id]?.submitted_at && !R.fin[id]?.approved_at);
@@ -661,7 +701,7 @@ VIEWS['hr-list'] = async () => {
   };
   $('#csv').onclick = () => downloadCSV(`評価一覧_${TRACK_LABEL[track]}_${S.period.name}.csv`, [
     ['施設', '氏名', '等級', '自己合計', '一次合計', 'KPI点', ...crit.map((c) => `最終:${c.name}`), '最終合計', 'ランク', '昇給額', '承認', '公開'],
-    ...list.map((e) => { const f = R.fin[e.id] ?? {}; return [facName(e.facility_id), fullName(e), e.grade, tot(R.self[e.id]?.scores), tot(R.prim[e.id]?.scores),
+    ...list.map((e) => { const f = R.fin[e.id] ?? {}; return [facName(e.facility_id), fullName(e), e.grade, totOf(R.self[e.id]), totOf(R.prim[e.id]),
       f.kpi_score ?? '', ...crit.map((c) => (f.scores?.[c.id] ? pointsOf(c, f.scores[c.id]) : '')), f.total ?? '', f.rank ?? '', f.up_amount ?? '', f.approved_at ? '済' : '', f.published ? '済' : '']; }),
   ]);
 };
