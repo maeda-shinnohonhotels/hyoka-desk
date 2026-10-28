@@ -170,7 +170,7 @@ function readScores(prefix, criteria = critOf(), root = document) {
 }
 function rubricHTML(track = 'general') {
   if (track === 'manager') {
-    return `<p class="rubric">管理者評価：${critOf('manager').length}項目・${maxScore(critOf('manager'))}点満点。項目ごとに配点が違います（ボタンの数字が点数）。事業所の実績・ランクはなく、昇給額は人事が給与改定で決めます。</p>`;
+    return `<p class="rubric">管理者評価：${critOf('manager').length}項目・${maxScore(critOf('manager'))}点満点。項目ごとに配点が違います（ボタンの数字が点数）。事業所の実績・ランクはなく、昇給額は人事が決めます。</p>`;
   }
   return `<details class="rubric"><summary>評価基準（1〜5の定義）</summary>
     ${RUBRIC.map(([n, t, d]) => `<div><b>${n}（${t}）</b> ${esc(d)}</div>`).join('')}
@@ -470,12 +470,12 @@ async function evalDetail(empId) {
       ${manualNote({ 合計: fin.total_manual, ランク: fin.rank_manual, 昇給額: fin.up_manual == null ? null : `${yen(fin.up_manual)}円` })}
       ${!['primary', 'final', 'closed'].includes(p.status) && !isHR() ? `<p class="muted">${S.me.role === 'evaluator2' ? '一次評価期間になると入力できます。' : '最終決定は評価者（2次）が入力します。'}</p>` : `
       <form id="ff">${criteriaForm('f', finScores, { readonly: !finEditable, refs: [['自己', self.scores], ['一次', prim.scores]], crit })}
-        <p>${mgr ? `合計 <b id="ftot">${totalWith(finScores)}</b> / ${maxScore(crit)}点<b id="frank"></b>（昇給額は給与改定で決めます）`
+        <p>${mgr ? `合計 <b id="ftot">${totalWith(finScores)}</b> / ${maxScore(crit)}点<b id="frank"></b>（昇給額は下の直接入力か給与改定で決めます）`
           : `合計 <b id="ftot">${totalWith(finScores)}</b>点 → ランク <b id="frank">${esc(rankTxt(totalWith(finScores)))}</b>（+<span id="fup">${yen(rankOf(totalWith(finScores))?.up)}</span>円）`}</p>
         ${isHR() ? `<div class="row" style="flex-wrap:wrap;gap:8px 16px"><span class="muted">直接入力（空欄は上の計算どおり）：</span>
           <label>合計 <input id="fmt" class="xs" value="${fin.total_manual ?? ''}" inputmode="numeric"></label>
-          ${mgr ? '' : `<label>ランク <select id="fmr"><option value="">自動</option>${(p.rank_rules ?? []).map((r) => r.rank).sort().map((r) => `<option ${fin.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></label>
-          <label>昇給額 <input id="fmu" class="sm" value="${fin.up_manual ?? ''}" inputmode="numeric"></label>`}</div>` : ''}
+          ${mgr ? '' : `<label>ランク <select id="fmr"><option value="">自動</option>${(p.rank_rules ?? []).map((r) => r.rank).sort().map((r) => `<option ${fin.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></label>`}
+          <label>昇給額 <input id="fmu" class="sm" value="${fin.up_manual ?? ''}" inputmode="numeric"></label></div>` : ''}
         <label class="field">本人へのフィードバック（公開時に本人に表示されます）<textarea id="fc" ${finEditable ? '' : 'disabled'}>${esc(fin.comment)}</textarea></label>
         ${!finEditable ? '' : hrFix ? `<div class="row" style="margin-top:12px"><span class="grow muted">${p.status === 'closed' ? '締めた期' : '人事承認済み'}の評価です。直すと合計・ランクが変わることがあります。</span><button type="button" id="fsave" class="primary">修正を保存</button></div>`
           : '<div class="row" style="margin-top:12px"><button type="button" id="fsave">下書き保存</button><button type="button" id="fsub" class="primary">最終評価を提出</button></div>'}
@@ -606,7 +606,7 @@ VIEWS['hr-list'] = async () => {
   const empBy = Object.fromEntries(list.map((e) => [e.id, e]));
   const finScoresOf = (id) => (Object.keys(R.fin[id]?.scores ?? {}).length ? R.fin[id].scores : R.prim[id]?.scores ?? {});
   const kpiOf = (e) => R.fin[e.id]?.kpi_score ?? kpiFor(e.facility_id);
-  const cols = mgr ? 8 : 11;
+  const cols = mgr ? 9 : 11;
   const manualChip = (on) => (on ? ' <span class="chip warn" title="人事が直接入力">手入力</span>' : '');
   const numIn = (k, v, ph) => `<input class="xs" data-k="${k}" value="${v ?? ''}" placeholder="${esc(ph ?? '')}" inputmode="numeric">`;
   const rowHTML = (e, editing = false) => {
@@ -621,8 +621,8 @@ VIEWS['hr-list'] = async () => {
       ${mgr ? '' : `<td class="num">${editing ? `<input class="xs" data-k="kpi_score" value="${kpiOf(e) ?? ''}" inputmode="numeric">` : kpiOf(e) ?? ''}</td>`}
       <td class="num" data-sort="${f?.total ?? ''}">${editing ? numIn('total_manual', f?.total_manual, calcTotal) : `<b>${f?.total ?? ''}</b>${manualChip(f?.total_manual != null)}`}</td>
       ${mgr ? '' : `<td data-sort="${esc(f?.rank ?? '')}">${editing ? `<select data-k="rank_manual"><option value="">自動（${esc(autoRank?.rank ?? '–')}）</option>${(S.period.rank_rules ?? []).map((r) => r.rank).sort()
-        .map((r) => `<option ${f?.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>` : `<b>${esc(f?.rank)}</b>${manualChip(f?.rank_manual != null)}`}</td>
-      <td class="num" data-sort="${f?.up_amount ?? ''}">${editing ? numIn('up_manual', f?.up_manual, (S.period.rank_rules ?? []).find((r) => r.rank === f?.rank_manual)?.up ?? autoRank?.up) : `${f ? yen(f.up_amount) : ''}${manualChip(f?.up_manual != null)}`}</td>`}
+        .map((r) => `<option ${f?.rank_manual === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>` : `<b>${esc(f?.rank)}</b>${manualChip(f?.rank_manual != null)}`}</td>`}
+      <td class="num" data-sort="${f?.up_amount ?? ''}">${editing ? numIn('up_manual', f?.up_manual, (S.period.rank_rules ?? []).find((r) => r.rank === f?.rank_manual)?.up ?? autoRank?.up) : `${f ? yen(f.up_amount) : ''}${manualChip(f?.up_manual != null)}`}</td>
       <td data-sort="${STAGES.findIndex(([s]) => s === stageLabel(e.id, R))}">${stageChip(e.id, R)}</td>
       <td style="white-space:nowrap">${editing ? '<button class="rs primary">保存</button><button class="rc">取消</button>' : '<button class="re" title="この行を修正">✎</button>'}</td></tr>`;
     if (!editing) return main;
@@ -643,10 +643,10 @@ VIEWS['hr-list'] = async () => {
       ${mgr ? '' : `<select id="lrank">${optionsHTML(rankOptions('全ランク'), rk)}</select>`}
       <select id="lstage">${optionsHTML([['', '全状況'], ...STAGES.map(([s]) => [s, s])], stg)}</select>
       <span class="muted">${list.length} / ${inTrack.length}名</span></div>
-    ${mgr ? `<p class="muted">管理者：${crit.length}項目・${maxScore(crit)}点満点。事業所の実績・ランクはなく、昇給額は給与改定で決めます。</p>` : ''}
+    ${mgr ? `<p class="muted">管理者：${crit.length}項目・${maxScore(crit)}点満点。事業所の実績・ランクはありません。昇給額は右端の ✎ で入力すると、給与改定の「昇給額を反映」で基本給(後)に入ります。</p>` : ''}
     ${open ? '' : '<p class="muted"><span class="chip warn">締め</span>　締めた期です。右端の ✎ で直せますが、保存すると確定済みの評価が変わります。</p>'}
     <div class="panel scroll"><table id="lt">
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th>${mgr ? '' : '<th class="num">KPI</th>'}<th class="num">最終合計</th>${mgr ? '' : '<th>ランク</th><th class="num">昇給額</th>'}<th>状況</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th>等級</th><th class="num">自己</th><th class="num">一次</th>${mgr ? '' : '<th class="num">KPI</th>'}<th class="num">最終合計</th>${mgr ? '' : '<th>ランク</th>'}<th class="num">昇給額</th><th>状況</th><th></th></tr>
       ${list.map((e) => rowHTML(e)).join('')}
     </table></div>`);
   bindPeriodPicker();
@@ -687,7 +687,7 @@ VIEWS['hr-list'] = async () => {
         if (nums[k] !== (r?.total_manual ?? null)) await q(sb.from(tbl).upsert({ period_id: S.period.id, employee_id: id, total_manual: nums[k] }));
       }
       // A blank KPI falls back to the facility KPI (compute_final fills it in).
-      const patch = { scores, kpi_score: mgr ? null : nums.kpi_score, total_manual: nums.total_manual, rank_manual: mgr ? null : rankIn, up_manual: mgr ? null : nums.up_manual };
+      const patch = { scores, kpi_score: mgr ? null : nums.kpi_score, total_manual: nums.total_manual, rank_manual: mgr ? null : rankIn, up_manual: nums.up_manual };
       if (f) await q(sb.from('final_reviews').update(patch).eq('period_id', S.period.id).eq('employee_id', id));
       else if (Object.keys(scores).length || patch.total_manual != null || patch.rank_manual || patch.up_manual != null) {
         await q(sb.from('final_reviews').insert({ period_id: S.period.id, employee_id: id, ...patch }));
@@ -761,7 +761,7 @@ VIEWS['hr-salary'] = async () => {
   const [rows, emps, fins] = await Promise.all([
     q(sb.from('salary_revisions').select('*').eq('period_id', p.id)),
     q(sb.from('employees').select('*').eq('active', true)),
-    q(sb.from('final_reviews').select('employee_id, scores, total, rank, up_amount, approved_at').eq('period_id', p.id)),
+    q(sb.from('final_reviews').select('employee_id, scores, total, rank, up_amount, up_manual, approved_at').eq('period_id', p.id)),
   ]);
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const finBy = Object.fromEntries(fins.map((f) => [f.employee_id, f]));
@@ -799,7 +799,7 @@ VIEWS['hr-salary'] = async () => {
   };
   render(`
     <div class="row"><h1 class="grow">給与改定</h1>${periodPicker()}
-      ${open ? `<button id="seed">前期の改定後を取り込む</button><button id="apply">${mgr ? '上書きの昇給額を反映' : '評価ランクの昇給額を反映'}</button>` : ''}<button id="csv">CSV出力</button></div>
+      ${open ? `<button id="seed">前期の改定後を取り込む</button><button id="apply">${mgr ? '昇給額を反映' : '評価ランクの昇給額を反映'}</button>` : ''}<button id="csv">CSV出力</button></div>
     ${open || !editable ? '' : '<p class="muted"><span class="chip warn">締め</span>　締めた期です。右端の ✎ で直せますが、保存すると確定済みの給与が変わります。</p>'}
     <div class="row filters tabs">${Object.entries(TRACK_LABEL).map(([k, l]) => `<button data-track="${k}" class="${k === track ? 'on' : ''}">${l}（${count(k)}名）</button>`).join('')}</div>
     <div class="row filters">
@@ -865,9 +865,10 @@ VIEWS['hr-salary'] = async () => {
   };
   $('#apply').onclick = async () => {
     // Managers have no rank, so an approved review alone has no raise to apply; skip them until a raise is typed in.
-    const t = list.filter((r) => (finBy[r.employee_id]?.approved_at || r.eval_up != null) && r.base_before != null && salaryEval(r, finBy[r.employee_id]).up != null);
-    if (!t.length) return toast('人事承認済みの評価・上書きした昇給額がありません', true);
-    if (!confirm(`人事承認済み・上書きした ${t.length}名の基本給(後)を「基本給(前)＋昇給額」で上書きします。`)) return;
+    // A raise HR typed in on 評価一覧 (up_manual) counts even before approval.
+    const t = list.filter((r) => (finBy[r.employee_id]?.approved_at || r.eval_up != null || finBy[r.employee_id]?.up_manual != null) && r.base_before != null && salaryEval(r, finBy[r.employee_id]).up != null);
+    if (!t.length) return toast('人事承認済みの評価・入力した昇給額がありません', true);
+    if (!confirm(`人事承認済み・昇給額を入力した ${t.length}名の基本給(後)を「基本給(前)＋昇給額」で上書きします。`)) return;
     for (const r of t) {
       await q(sb.from('salary_revisions').update({ base_after: r.base_before + (salaryEval(r, finBy[r.employee_id]).up ?? 0) }).eq('period_id', p.id).eq('employee_id', r.employee_id));
     }
