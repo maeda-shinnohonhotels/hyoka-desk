@@ -57,12 +57,25 @@ Deno.serve(async (req) => {
       const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
       let uid = created.data.user?.id ?? null;
       if (created.error) {
-        // A login with this address already exists: link it and keep its password.
-        password = null;
         const { data: list, error } = await admin.auth.admin.listUsers({ perPage: 1000 });
         if (error) return json({ error: `ログインの確認に失敗しました：${error.message}` }, 500);
-        uid = list.users.find((u) => u.email?.toLowerCase() === email)?.id ?? null;
-        if (!uid) return json({ error: `ログインを作れませんでした：${created.error.message}` }, 500);
+        const found = list.users.find((u) => u.email?.toLowerCase() === email);
+        if (!found) return json({ error: `ログインを作れませんでした：${created.error.message}` }, 500);
+        if (found.email_confirmed_at) {
+          // A confirmed login with this address already exists: link it and keep its password.
+          password = null;
+          uid = found.id;
+        } else {
+          // An unconfirmed login may have been registered by someone else in advance, with a password they know:
+          // never link it; replace it with a fresh one.
+          const { data: owner } = await admin.from('employees').select('id').eq('user_id', found.id).maybeSingle();
+          if (owner) return json({ error: 'このメールのログインは、ほかの社員にひも付いています。' }, 409);
+          const { error: delErr } = await admin.auth.admin.deleteUser(found.id);
+          if (delErr) return json({ error: `ログインを作り直せませんでした：${delErr.message}` }, 500);
+          const again = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+          if (again.error || !again.data.user) return json({ error: `ログインを作れませんでした：${again.error?.message}` }, 500);
+          uid = again.data.user.id;
+        }
       }
       const { data: taken } = await admin.from('employees').select('id').eq('user_id', uid).neq('id', emp.id).maybeSingle();
       if (taken) return json({ error: 'このメールのログインは、ほかの社員にひも付いています。' }, 409);

@@ -218,9 +218,26 @@ async function setPeriod(p) {
 }
 async function logout() { await sb.auth.signOut(); ['period', 'view'].forEach((k) => sessionStorage.removeItem(k)); location.reload(); }
 
+// Sign out after 30 minutes without any input, so a shared PC (e.g. at the front desk) is not left logged in.
+const IDLE_MS = 30 * 60 * 1000;
+let lastInput = Date.now();
+['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((ev) => addEventListener(ev, () => { lastInput = Date.now(); }, { passive: true }));
+const checkIdle = () => {
+  if (!S.me || Date.now() - lastInput < IDLE_MS) return;
+  sessionStorage.setItem('idleOut', '1');
+  logout();
+};
+setInterval(checkIdle, 60 * 1000);
+// Timers are slowed in background tabs; check again as soon as the tab is shown.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIdle(); });
+
 function showLogin() {
   $('#nav').innerHTML = ''; $('#who').innerHTML = '';
   document.body.classList.add('is-login');
+  if (sessionStorage.getItem('idleOut')) {
+    sessionStorage.removeItem('idleOut');
+    setTimeout(() => toast('30分間操作がなかったため、ログアウトしました'), 0);
+  }
   render(`<div class="login">
     <div class="login-hero">
       <img src="logo.png" alt="" width="72" height="72">
@@ -337,8 +354,8 @@ VIEWS.password = async () => {
         : `次からは、ログイン画面で社員番号（${esc(S.me.employee_no)}）とこのパスワードでログインできます。`}</p>
       <form id="pwf" style="display:flex;flex-direction:column;gap:8px">
         <input value="${esc(S.me.email ?? S.me.employee_no)}" autocomplete="username" readonly hidden>
-        <label class="field">新しいパスワード（8文字以上）<input id="np1" type="password" required minlength="8" autocomplete="new-password"></label>
-        <label class="field">確認のため、もう一度<input id="np2" type="password" required minlength="8" autocomplete="new-password"></label>
+        <label class="field">新しいパスワード（10文字以上）<input id="np1" type="password" required minlength="10" autocomplete="new-password"></label>
+        <label class="field">確認のため、もう一度<input id="np2" type="password" required minlength="10" autocomplete="new-password"></label>
         <div class="row"><button class="primary">保存</button><button type="button" id="pwback">戻る</button></div>
       </form>
     </div>`);
@@ -347,7 +364,7 @@ VIEWS.password = async () => {
     e.preventDefault();
     const p1 = $('#np1').value, p2 = $('#np2').value;
     if (p1 !== p2) return toast('2回入れたパスワードが違います', true);
-    if (p1.length < 8) return toast('パスワードは8文字以上にしてください', true);
+    if (p1.length < 10) return toast('パスワードは10文字以上にしてください', true);
     const { error } = await sb.auth.updateUser({ password: p1 });
     if (error) return toast(`保存できませんでした：${error.message}`, true);
     $('#np1').value = $('#np2').value = '';
