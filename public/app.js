@@ -36,7 +36,8 @@ function toast(msg, err = false) {
 }
 async function q(p) {
   const { data, error } = await p;
-  if (error) { toast(error.message, true); throw error; }
+  // A duplicate 社員番号 (unique index) gets a readable message.
+  if (error) { toast(error.code === '23505' && /employee_no/.test(error.message) ? 'この社員番号はほかの社員に登録されています' : error.message, true); throw error; }
   return data;
 }
 function render(html) { $('#app').innerHTML = html; }
@@ -993,7 +994,7 @@ VIEWS['hr-staff'] = async () => {
   const fac = Number(sessionStorage.getItem('sfac')) || 0;
   const kw = sessionStorage.getItem('skw') ?? '';
   const role = filterVal('srole'), trk = filterVal('strack'), tgt = filterVal('stgt'), act = filterVal('sact'), evf = filterVal('sev');
-  const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw))
+  const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw) || (e.employee_no ?? '').includes(kw))
     && (!role || e.role === role) && (!trk || trackOf(e) === trk) && (!tgt || e.eval_target === (tgt === '1')) && (!act || e.active === (act === '1'))
     && (!evf || (evf === 'none' ? e.eval_target && !links.some((l) => l.employee_id === e.id) : links.some((l) => l.employee_id === e.id && l.evaluator_id === evf))))
     .sort((a, b) => (S.facilities.find((f) => f.id === a.facility_id)?.sort ?? 99) - (S.facilities.find((f) => f.id === b.facility_id)?.sort ?? 99) || Number(b.role !== 'staff') - Number(a.role !== 'staff'));
@@ -1008,7 +1009,7 @@ VIEWS['hr-staff'] = async () => {
     <div class="row"><h1 class="grow">社員・評価者</h1><button id="csv">CSV出力</button></div>
     <div class="row filters">
       <select id="sfac"><option value="0">全施設</option>${facOpts(fac)}</select>
-      <input id="skw" placeholder="氏名・メールで検索" value="${esc(kw)}">
+      <input id="skw" placeholder="氏名・社員番号・メールで検索" value="${esc(kw)}">
       <select id="srole">${optionsHTML([['', '全権限'], ...Object.entries(ROLE_LABEL)], role)}</select>
       <select id="strack">${optionsHTML([['', '全区分'], ...Object.entries(TRACK_LABEL)], trk)}</select>
       <select id="stgt">${optionsHTML([['', '評価対象：すべて'], ['1', '評価対象のみ'], ['0', '評価対象外のみ']], tgt)}</select>
@@ -1026,10 +1027,11 @@ VIEWS['hr-staff'] = async () => {
       <p class="muted">評価者の候補は、権限が「一般」以外の社員です。評価者（1次）は一次評価、評価者（2次）は最終決定を入力します。先に下の一覧で権限を変更してください。</p>
     </div>
     <div class="panel scroll"><table id="et">
-      <tr><th>施設</th><th>氏名</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th>社員番号</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th></th></tr>
       ${list.map((e) => `<tr data-id="${e.id}">
         <td data-sort="${facSort(e.facility_id)}"><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
         <td>${esc(fullName(e))}${e.user_id ? ' <span class="chip ok" title="ログイン済み">✓</span>' : ''}</td>
+        <td><input class="sm" data-k="employee_no" value="${esc(e.employee_no)}" placeholder="未登録"></td>
         <td><input class="xs" data-k="grade" value="${esc(e.grade)}"></td>
         <td><input data-k="email" type="email" value="${esc(e.email)}" placeholder="未登録"${lock(e) ? ' disabled title="人事・取締役のメールは「権限の申請」で変えます"' : ''}></td>
         <td data-sort="${Object.keys(ROLE_LABEL).indexOf(e.role)}">${lock(e) ? `<b>${ROLE_LABEL[e.role]}</b>` : `<select data-k="role">${optionsHTML(plainRoles, e.role)}</select>`}</td>
@@ -1043,7 +1045,7 @@ VIEWS['hr-staff'] = async () => {
     <div class="panel">
       <h2 style="margin-top:0">社員を追加</h2>
       <form id="af" class="row">
-        <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm">
+        <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm"><input name="employee_no" placeholder="社員番号" class="sm">
         <select name="facility_id">${facOpts(fac)}</select><input name="grade" placeholder="等級" class="xs">
         <input name="hire_date" type="date"><input name="email" type="email" placeholder="メールアドレス">
         <select name="role">${optionsHTML(plainRoles, 'staff')}</select>
@@ -1080,8 +1082,8 @@ VIEWS['hr-staff'] = async () => {
     await q(sb.from('employees').insert(o));
     toast('追加しました'); go('hr-staff');
   };
-  $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '等級', '入社日', 'メール', '権限', '評価区分', '評価対象', '在籍', '評価者'],
-    ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], TRACK_LABEL[trackOf(e)], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
+  $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '社員番号', '等級', '入社日', 'メール', '権限', '評価区分', '評価対象', '在籍', '評価者'],
+    ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.employee_no, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], TRACK_LABEL[trackOf(e)], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
 };
 
 // ---------- HR: role requests ----------
