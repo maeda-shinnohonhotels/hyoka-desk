@@ -1055,13 +1055,15 @@ VIEWS['hr-staff'] = async (issued) => {
   const noEmail = emps.filter((e) => e.active && !e.email).length;
   // 人事・取締役 rows are locked here: their role, email and 在籍 change only through 権限の申請.
   const lock = (e) => PRIV_ROLES.includes(e.role);
+  // Only the approver re-issues another 人事・取締役's password (the Edge Function checks this too).
+  const privReissue = (e) => lock(e) && S.me.is_approver && e.user_id && e.active && e.id !== S.me.id;
   const plainRoles = Object.entries(ROLE_LABEL).filter(([k]) => !PRIV_ROLES.includes(k));
   render(`
     <div class="row"><h1 class="grow">社員・評価者</h1><button id="csv">CSV出力</button></div>
     ${issued ? `<div class="panel" style="border-color:var(--accent)">
-      <h2 style="margin-top:0">${esc(issued.name)} さんのログインIDを${issued.reissued ? '再発行' : '発行'}しました</h2>
-      <p>ログイン画面で、次の社員番号と仮パスワードを入れます。<b>手渡しや口頭など安全な方法で</b>本人に伝えてください。ログイン後、右上の「パスワード設定」で自分のパスワードに変えてもらいます。</p>
-      <p>ID（社員番号）：<b>${esc(issued.login_id)}</b><br>仮パスワード：<b style="font-family:monospace;font-size:18px;letter-spacing:1px">${esc(issued.temp_password)}</b> <button id="cppw">コピー</button></p>
+      <h2 style="margin-top:0">${esc(issued.name)} さんの${issued.login_email ? 'パスワード' : 'ログインID'}を${issued.reissued ? '再発行' : '発行'}しました</h2>
+      <p>ログイン画面${issued.login_email ? 'の「メールアドレスでログイン」' : ''}で、次の${issued.login_email ? 'メールアドレス' : '社員番号'}と仮パスワードを入れます。<b>手渡しや口頭など安全な方法で</b>本人に伝えてください。ログイン後、右上の「パスワード設定」で自分のパスワードに変えてもらいます。</p>
+      <p>${issued.login_email ? `メール：<b>${esc(issued.login_email)}</b>` : `ID（社員番号）：<b>${esc(issued.login_id)}</b>`}<br>仮パスワード：<b style="font-family:monospace;font-size:18px;letter-spacing:1px">${esc(issued.temp_password)}</b> <button id="cppw">コピー</button></p>
       <p class="muted">この仮パスワードは、この画面を離れると二度と表示されません。</p>
       <button id="pwdone" class="primary">伝え終わったので閉じる</button></div>` : ''}
     <div class="row filters">
@@ -1096,7 +1098,7 @@ VIEWS['hr-staff'] = async (issued) => {
         <td><input type="checkbox" data-k="eval_target" ${e.eval_target ? 'checked' : ''}></td>
         <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}${lock(e) ? ' disabled' : ''}></td>
         <td>${e.eval_target ? (evOf(e.id).map((v) => esc(fullName(v))).join('、') || '<span class="chip ng">未設定</span>') : ''}</td>
-        <td style="white-space:nowrap">${lock(e) ? (e.user_id ? '<span class="chip ok">メール</span>' : '') : `<button class="li" title="社員番号と仮パスワードでログインできるようにします">${e.user_id ? 'PW再発行' : 'ID発行'}</button>`}</td>
+        <td style="white-space:nowrap">${lock(e) ? (e.user_id ? '<span class="chip ok">メール</span>' : '') + (privReissue(e) ? ' <button class="li" title="承認者だけが使えます。仮パスワードを作ります">PW再発行</button>' : '') : `<button class="li" title="社員番号と仮パスワードでログインできるようにします">${e.user_id ? 'PW再発行' : 'ID発行'}</button>`}</td>
         <td><button class="es">保存</button></td></tr>`).join('')}
     </table></div>
     <p class="muted">人事・取締役の権限をつける・外すとき、人事・取締役の人のメール・在籍を変えるときは、「<a href="#" id="toroles">権限の申請</a>」から申請し、承認を受けてください。</p>
@@ -1120,7 +1122,7 @@ VIEWS['hr-staff'] = async (issued) => {
   $$('#et .li').forEach((b) => (b.onclick = async () => {
     const e = by[b.closest('tr').dataset.id];
     const typed = $('[data-k=employee_no]', b.closest('tr')).value.trim();
-    if (!e.employee_no || typed !== e.employee_no) return toast('先に社員番号を入れて「保存」してください', true);
+    if (!lock(e) && (!e.employee_no || typed !== e.employee_no)) return toast('先に社員番号を入れて「保存」してください', true);
     if (!confirm(e.user_id ? `${fullName(e)} さんのパスワードを再発行します。いまのパスワードは使えなくなります。` : `${fullName(e)} さんに、社員番号 ${e.employee_no} でログインできるIDを発行します。`)) return;
     b.disabled = true;
     const { data, error } = await sb.functions.invoke('issue-staff-login', { body: { employee_id: e.id } });
