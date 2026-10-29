@@ -80,6 +80,15 @@ Deno.serve(async (req) => {
       const { data: taken } = await admin.from('employees').select('id').eq('user_id', uid).neq('id', emp.id).maybeSingle();
       if (taken) return json({ error: 'このメールのログインは、ほかの社員にひも付いています。' }, 409);
       patch.user_id = uid;
+    } else {
+      // They already have a login (e.g. from an earlier grant): move it to the approved address,
+      // so the sign-in address always matches the one on file.
+      const { data: cur, error } = await admin.auth.admin.getUserById(emp.user_id);
+      if (error || !cur.user) return json({ error: 'いまのログインが見つかりません。' }, 500);
+      if (cur.user.email?.toLowerCase() !== email) {
+        const { error: mvErr } = await admin.auth.admin.updateUserById(emp.user_id, { email, email_confirm: true });
+        if (mvErr) return json({ error: `ログインのメールアドレスを変えられませんでした：${mvErr.message}` }, 500);
+      }
     }
   }
 
