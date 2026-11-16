@@ -1057,6 +1057,7 @@ VIEWS['hr-raise'] = async () => {
 
 // ---------- HR: bonus ----------
 // 賞与 = 基本給 × 在籍係数 × 出勤係数 × 評価係数（円未満切り捨て）、支給額 = 賞与 + 在籍加算. The database computes both.
+// 在籍加算 is paid with some rounds only (夏季); for the others (冬季) its column is hidden and left blank.
 // 基本給 is copied from 給与改定の「基本給(前)」 of the round's period when the round is made, and can be fixed per row.
 const BONUS_COEFS = [['enroll_coef', '在籍係数'], ['attend_coef', '出勤係数'], ['eval_coef', '評価係数']];
 const coefTxt = (v) => (v == null ? '' : String(Number(v)));
@@ -1076,6 +1077,7 @@ VIEWS['hr-bonus'] = async () => {
     && (!st || (st === 'todo' ? r.total == null : r.total != null)))
     .sort((a, b) => facSort(empBy[a.employee_id].facility_id) - facSort(empBy[b.employee_id].facility_id));
   const byId = Object.fromEntries(list.map((r) => [r.employee_id, r]));
+  const addOn = round?.has_enroll_add ?? true;
   const sum = (k) => list.reduce((t, r) => t + (r[k] ?? 0), 0);
   const todo = list.filter((r) => r.total == null).length;
   const rowHTML = (r, editing = false) => {
@@ -1086,7 +1088,7 @@ VIEWS['hr-bonus'] = async () => {
       <td class="num">${editing ? inp('base_salary', 'sm', r.base_salary) : yen(r.base_salary)}</td>
       ${BONUS_COEFS.map(([k]) => `<td class="num">${editing ? inp(k, 'xs', coefTxt(r[k])) : coefTxt(r[k])}</td>`).join('')}
       <td class="num">${yen(r.bonus)}</td>
-      <td class="num">${editing ? inp('enroll_add', 'sm', r.enroll_add) : yen(r.enroll_add)}</td>
+      ${addOn ? `<td class="num">${editing ? inp('enroll_add', 'sm', r.enroll_add) : yen(r.enroll_add)}</td>` : ''}
       <td class="num"><b>${yen(r.total)}</b></td>
       <td>${editing ? inp('note', '', r.note) : esc(r.note)}</td>
       <td style="white-space:nowrap">${editing ? '<button class="rs primary">保存</button><button class="rc">取消</button><button class="rd danger" title="この人を今回の賞与から外します">外す</button>' : '<button class="re" title="この行を修正">✎</button>'}</td></tr>`;
@@ -1100,31 +1102,33 @@ VIEWS['hr-bonus'] = async () => {
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="bkw" placeholder="氏名で検索" value="${esc(kw)}">
       <select id="bst">${optionsHTML([['', 'すべて'], ['todo', '支給額が未確定'], ['done', '支給額が確定']], st)}</select></div>
-    <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
+    <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円${addOn ? `（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）` : '（在籍加算なし）'}　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
     <div class="panel scroll"><table id="bt">
-      <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th><th class="num">在籍加算</th><th class="num">支給額</th><th>備考</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額</th><th>備考</th><th></th></tr>
       ${list.map((r) => rowHTML(r)).join('')}
     </table></div>
-    <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝賞与＋在籍加算。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>
-    <p class="muted">まとめて入れるときは「CSV出力」したファイルに基本給・係数・在籍加算・備考を入れて保存し、「CSV取り込み」で読み込みます。ID の列はそのまま残してください（賞与・支給額の列は読み込みません）。</p>` :'<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
+    <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝${addOn ? '賞与＋在籍加算' : '賞与（この賞与は在籍加算なし）'}。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>
+    <p class="muted">まとめて入れるときは「CSV出力」したファイルに基本給・係数${addOn ? '・在籍加算' : ''}・備考を入れて保存し、「CSV取り込み」で読み込みます。ID の列はそのまま残してください（賞与・支給額の列は読み込みません）。</p>` :'<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
     <div class="panel">
       <h2 style="margin-top:0">新しい賞与を作成</h2>
       <form id="bnf" class="row"><input name="name" placeholder="例：2027年夏季賞与" required>
         <label class="field">評価期間<span class="row"><input name="eval_from" type="date" required>～<input name="eval_to" type="date" required></span></label>
         <label class="field">基本給を取る期間（給与改定の基本給(前)）<select name="salary_period_id">${S.periods.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+        <label class="row" style="gap:4px"><input name="has_enroll_add" type="checkbox" checked>在籍加算あり（夏季）</label>
         <button class="primary">作成</button></form>
+      <p class="muted">作成すると、対象者の3つの係数は 1 で始まります（違う人だけ CSV か ✎ で直します）。</p>
     </div>`);
   // Fill a round with every active employee who has a 給与改定 row in its period and is not in it yet.
   const seed = async (r, have) => {
     const sal = await q(sb.from('salary_revisions').select('employee_id, base_before').eq('period_id', r.salary_period_id));
-    const ins = sal.filter((s) => empBy[s.employee_id]?.active && !have.has(s.employee_id)).map((s) => ({ round_id: r.id, employee_id: s.employee_id, base_salary: s.base_before }));
+    const ins = sal.filter((s) => empBy[s.employee_id]?.active && !have.has(s.employee_id)).map((s) => ({ round_id: r.id, employee_id: s.employee_id, base_salary: s.base_before, enroll_coef: 1, attend_coef: 1, eval_coef: 1 }));
     if (ins.length) await q(sb.from('bonuses').insert(ins));
     return ins.length;
   };
   $('#bnf').onsubmit = async (ev) => {
     ev.preventDefault();
     const o = Object.fromEntries(new FormData(ev.target));
-    o.name = o.name.trim(); o.salary_period_id = Number(o.salary_period_id);
+    o.name = o.name.trim(); o.salary_period_id = Number(o.salary_period_id); o.has_enroll_add = !!o.has_enroll_add;
     if (!confirm(`「${o.name}」を作成し、給与改定の基本給(前)で対象者を取り込みます。`)) return;
     const r = await q(sb.from('bonus_rounds').insert(o).select().single());
     const n = await seed(r, new Set());
@@ -1139,10 +1143,10 @@ VIEWS['hr-bonus'] = async () => {
     toast(n ? `${n}名を取り込みました` : '取り込む人はいません'); go('hr-bonus');
   };
   // The CSV goes out with an ID column so a file filled in elsewhere (e.g. Excel) comes back to the same rows.
-  const CSV_HEAD = ['ID', '施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', '在籍加算', '支給額', '備考'];
+  const CSV_HEAD = ['ID', '施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', ...(addOn ? ['在籍加算'] : []), '支給額', '備考'];
   $('#csv').onclick = () => downloadCSV(`賞与_${round.name}.csv`, [
     CSV_HEAD,
-    ...list.map((r) => { const e = empBy[r.employee_id]; return [r.employee_id, facName(e.facility_id), e.last_name, e.first_name, r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, r.enroll_add, r.total, r.note]; }),
+    ...list.map((r) => { const e = empBy[r.employee_id]; return [r.employee_id, facName(e.facility_id), e.last_name, e.first_name, r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, ...(addOn ? [r.enroll_add] : []), r.total, r.note]; }),
   ]);
   $('#bimp').onclick = () => $('#bfile').click();
   $('#bfile').onchange = async () => {
@@ -1154,7 +1158,7 @@ VIEWS['hr-bonus'] = async () => {
     const col = (name) => head.indexOf(name);
     if (col('ID') < 0) return toast('「CSV出力」で出したファイル（先頭の列が ID）を使ってください', true);
     // 賞与・支給額 are computed by the database, so those columns are ignored.
-    const fields = [['base_salary', '基本給'], ...BONUS_COEFS, ['enroll_add', '在籍加算']].filter(([, l]) => col(l) >= 0);
+    const fields = [['base_salary', '基本給'], ...BONUS_COEFS, ...(addOn ? [['enroll_add', '在籍加算']] : [])].filter(([, l]) => col(l) >= 0);
     const have = Object.fromEntries(rows.map((r) => [r.employee_id, r]));
     const errs = [], ups = [];
     let unknown = 0;
