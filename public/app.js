@@ -1074,6 +1074,9 @@ VIEWS['hr-bonus'] = async () => {
     q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type')),
   ]) : [[], await q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type'))];
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
+  const inRound = new Set(rows.map((r) => r.employee_id));
+  const notIn = emps.filter((e) => e.active && !inRound.has(e.id))
+    .sort((a, b) => facSort(a.facility_id) - facSort(b.facility_id) || a.last_name.localeCompare(b.last_name, 'ja'));
   const fac = Number(sessionStorage.getItem('fac')) || 0;
   const kw = filterVal('bkw'), st = filterVal('bst'), part = filterVal('btype') === 'part';
   const all = rows.filter((r) => empBy[r.employee_id]);
@@ -1116,6 +1119,12 @@ VIEWS['hr-bonus'] = async () => {
     </table></div>
     <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝${addOn ? '賞与＋在籍加算' : '賞与（この賞与は在籍加算なし）'}。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>
     <p class="muted">まとめて入れるときは「CSV出力」したファイルに基本給・係数${addOn ? '・在籍加算' : ''}・備考を入れて保存し、「CSV取り込み」で読み込みます。ID の列はそのまま残してください（賞与・支給額の列は読み込みません）。</p>` :'<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
+    ${round ? `<div class="panel">
+      <h2 style="margin-top:0">1名ずつ追加</h2>
+      <div class="row"><select id="bpick"><option value="">追加する人を選ぶ（${notIn.length}名）</option>${notIn.map((e) => `<option value="${e.id}">${esc(facName(e.facility_id))}　${esc(fullName(e))}（${esc(e.employment_type ?? '')}）</option>`).join('')}</select>
+        <label class="field">基本給<input id="bbase" class="sm" inputmode="numeric"></label><button id="bone" class="primary">追加</button></div>
+      <p class="muted">給与改定にいない人（新しく入った契約社員など）はここで追加します。基本給は、パートなら ${yen(PART_BASE)}円、給与改定にいる人はその基本給(前)が入ります（直せます）。係数は 1 で入ります。</p>
+    </div>` : ''}
     <div class="panel">
       <h2 style="margin-top:0">新しい賞与を作成</h2>
       <form id="bnf" class="row"><input name="name" placeholder="例：2027年夏季賞与" required>
@@ -1152,8 +1161,25 @@ VIEWS['hr-bonus'] = async () => {
   $$('[data-btype]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('btype', b.dataset.btype); go('hr-bonus'); }));
   sortable($('#bt'), `hr-bonus:${part}`);
   $('#badd').onclick = async () => {
-    const n = await seed(round, new Set(rows.map((r) => r.employee_id)));
-    toast(n ? `${n}名を取り込みました` : '取り込む人はいません'); go('hr-bonus');
+    const n = await seed(round, inRound);
+    toast(n ? `${n}名を取り込みました` : '取り込む人はいません（給与改定にいない人は「1名ずつ追加」で入れてください）'); go('hr-bonus');
+  };
+  // One person at a time, e.g. a new 契約社員 who is not in 給与改定: 基本給 starts from PART_BASE or their 基本給(前).
+  $('#bpick').onchange = async () => {
+    const e = empBy[$('#bpick').value];
+    if (!e) return ($('#bbase').value = '');
+    if (isPart(e)) return ($('#bbase').value = PART_BASE);
+    const s = await q(sb.from('salary_revisions').select('base_before').eq('period_id', round.salary_period_id).eq('employee_id', e.id));
+    $('#bbase').value = s[0]?.base_before ?? '';
+  };
+  $('#bone').onclick = async () => {
+    const e = empBy[$('#bpick').value];
+    if (!e) return toast('追加する人を選んでください', true);
+    const raw = $('#bbase').value.replace(/[,円\s]/g, '');
+    if (raw !== '' && !(Number(raw) >= 0)) return toast('基本給を数字で入れてください', true);
+    await q(sb.from('bonuses').insert({ round_id: round.id, employee_id: e.id, base_salary: raw === '' ? null : Number(raw), enroll_coef: 1, attend_coef: 1, eval_coef: 1 }));
+    sessionStorage.setItem('btype', isPart(e) ? 'part' : '');
+    toast(`${fullName(e)} さんを追加しました${raw === '' ? '（基本給が空欄なので、✎ で入れてください）' : ''}`); go('hr-bonus');
   };
   // The CSV goes out with an ID column so a file filled in elsewhere (e.g. Excel) comes back to the same rows.
   const CSV_HEAD = ['ID', '施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', ...(addOn ? ['在籍加算'] : []), '支給額', '備考'];
