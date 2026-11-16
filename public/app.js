@@ -320,7 +320,7 @@ function buildNav() {
   if (S.me.eval_target) items.push(['self', '自己評価']);
   items.push(['results', '評価結果']);
   if (S.me.role !== 'staff') items.push(['evaluate', '部下の評価']);
-  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-staff', '社員・評価者'], ['hr-roles', '権限の申請'], ['hr-period', '期間・設定']);
+  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-bonus', '賞与'], ['hr-staff', '社員・評価者'], ['hr-roles', '権限の申請'], ['hr-period', '期間・設定']);
   $('#nav').innerHTML = items.map(([k, l]) => `<button data-v="${k}">${l}</button>`).join('');
   $$('#nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
   if (isHR()) updateRoleBadge();
@@ -1033,6 +1033,132 @@ VIEWS['hr-raise'] = async () => {
     ['施設', '姓', '名', '区分', '等級(前)', '等級(後)', '基本給(前)', '基本給(後)', '月額計(前)', '月額計(後)', 'UP額'],
     ...list.map(({ r, e, trk, before, after, up }) => [facName(e.facility_id), e.last_name, e.first_name, TRACK_LABEL[trk], r.grade_before, r.grade_after, r.base_before, r.base_after, before, after ?? '', up ?? '']),
   ]);
+};
+
+// ---------- HR: bonus ----------
+// 賞与 = 基本給 × 在籍係数 × 出勤係数 × 評価係数（円未満切り捨て）、支給額 = 賞与 + 在籍加算. The database computes both.
+// 基本給 is copied from 給与改定の「基本給(前)」 of the round's period when the round is made, and can be fixed per row.
+const BONUS_COEFS = [['enroll_coef', '在籍係数'], ['attend_coef', '出勤係数'], ['eval_coef', '評価係数']];
+const coefTxt = (v) => (v == null ? '' : String(Number(v)));
+VIEWS['hr-bonus'] = async () => {
+  const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
+  const rid = Number(sessionStorage.getItem('bround')) || rounds[0]?.id;
+  const round = rounds.find((r) => r.id === rid) ?? rounds[0];
+  const [rows, emps] = round ? await Promise.all([
+    q(sb.from('bonuses').select('*').eq('round_id', round.id)),
+    q(sb.from('employees').select('id, last_name, first_name, facility_id, active')),
+  ]) : [[], []];
+  const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
+  const fac = Number(sessionStorage.getItem('fac')) || 0;
+  const kw = filterVal('bkw'), st = filterVal('bst');
+  const valid = rows.filter((r) => empBy[r.employee_id]);
+  const list = valid.filter((r) => (!fac || empBy[r.employee_id].facility_id === fac) && (!kw || fullName(empBy[r.employee_id]).includes(kw))
+    && (!st || (st === 'todo' ? r.total == null : r.total != null)))
+    .sort((a, b) => facSort(empBy[a.employee_id].facility_id) - facSort(empBy[b.employee_id].facility_id));
+  const byId = Object.fromEntries(list.map((r) => [r.employee_id, r]));
+  const sum = (k) => list.reduce((t, r) => t + (r[k] ?? 0), 0);
+  const todo = list.filter((r) => r.total == null).length;
+  const rowHTML = (r, editing = false) => {
+    const e = empBy[r.employee_id];
+    const inp = (k, cls, val) => editing ? `<input class="${cls}" data-k="${k}" value="${esc(val ?? '')}" inputmode="${k === 'note' ? 'text' : 'decimal'}">` : '';
+    return `<tr data-id="${r.employee_id}"${editing ? ' class="editing"' : ''}>
+      <td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}${e.active ? '' : ' <span class="chip warn">退職</span>'}</td>
+      <td class="num">${editing ? inp('base_salary', 'sm', r.base_salary) : yen(r.base_salary)}</td>
+      ${BONUS_COEFS.map(([k]) => `<td class="num">${editing ? inp(k, 'xs', coefTxt(r[k])) : coefTxt(r[k])}</td>`).join('')}
+      <td class="num">${yen(r.bonus)}</td>
+      <td class="num">${editing ? inp('enroll_add', 'sm', r.enroll_add) : yen(r.enroll_add)}</td>
+      <td class="num"><b>${yen(r.total)}</b></td>
+      <td>${editing ? inp('note', '', r.note) : esc(r.note)}</td>
+      <td style="white-space:nowrap">${editing ? '<button class="rs primary">保存</button><button class="rc">取消</button><button class="rd danger" title="この人を今回の賞与から外します">外す</button>' : '<button class="re" title="この行を修正">✎</button>'}</td></tr>`;
+  };
+  render(`
+    <div class="row"><h1 class="grow">賞与</h1>
+      ${rounds.length ? `<select id="bround">${rounds.map((r) => `<option value="${r.id}" ${r.id === round.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : ''}
+      ${round ? '<button id="badd">給与改定から足りない人を取り込む</button><button id="csv">CSV出力</button>' : ''}</div>
+    ${round ? `<p class="muted">評価期間：${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}　／　基本給：${esc(S.periods.find((p) => p.id === round.salary_period_id)?.name ?? '')}の給与改定「基本給(前)」</p>
+    <div class="row filters">
+      <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
+      <input id="bkw" placeholder="氏名で検索" value="${esc(kw)}">
+      <select id="bst">${optionsHTML([['', 'すべて'], ['todo', '支給額が未確定'], ['done', '支給額が確定']], st)}</select></div>
+    <div class="panel"><div class="row">
+      表示中の人の <select id="bk">${optionsHTML(BONUS_COEFS, 'enroll_coef')}</select> の空欄に
+      <input id="bv" class="xs" inputmode="decimal" placeholder="1.0"> を <button id="bfill">まとめて入れる</button>
+      <span class="muted">（入力済みの人は変わりません）</span></div></div>
+    <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
+    <div class="panel scroll"><table id="bt">
+      <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th><th class="num">在籍加算</th><th class="num">支給額</th><th>備考</th><th></th></tr>
+      ${list.map((r) => rowHTML(r)).join('')}
+    </table></div>
+    <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝賞与＋在籍加算。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>` : '<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
+    <div class="panel">
+      <h2 style="margin-top:0">新しい賞与を作成</h2>
+      <form id="bnf" class="row"><input name="name" placeholder="例：2027年夏季賞与" required>
+        <label class="field">評価期間<span class="row"><input name="eval_from" type="date" required>～<input name="eval_to" type="date" required></span></label>
+        <label class="field">基本給を取る期間（給与改定の基本給(前)）<select name="salary_period_id">${S.periods.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+        <button class="primary">作成</button></form>
+    </div>`);
+  // Fill a round with every active employee who has a 給与改定 row in its period and is not in it yet.
+  const seed = async (r, have) => {
+    const sal = await q(sb.from('salary_revisions').select('employee_id, base_before').eq('period_id', r.salary_period_id));
+    const ins = sal.filter((s) => empBy[s.employee_id]?.active && !have.has(s.employee_id)).map((s) => ({ round_id: r.id, employee_id: s.employee_id, base_salary: s.base_before }));
+    if (ins.length) await q(sb.from('bonuses').insert(ins));
+    return ins.length;
+  };
+  $('#bnf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const o = Object.fromEntries(new FormData(ev.target));
+    o.name = o.name.trim(); o.salary_period_id = Number(o.salary_period_id);
+    if (!confirm(`「${o.name}」を作成し、給与改定の基本給(前)で対象者を取り込みます。`)) return;
+    const r = await q(sb.from('bonus_rounds').insert(o).select().single());
+    const n = await seed(r, new Set());
+    sessionStorage.setItem('bround', r.id); toast(`作成しました（${n}名）`); go('hr-bonus');
+  };
+  if (!round) return;
+  $('#bround').onchange = () => { sessionStorage.setItem('bround', $('#bround').value); go('hr-bonus'); };
+  bindFilters('hr-bonus', { fac: 'fac', bkw: 'bkw', bst: 'bst' });
+  sortable($('#bt'), 'hr-bonus');
+  $('#badd').onclick = async () => {
+    const n = await seed(round, new Set(rows.map((r) => r.employee_id)));
+    toast(n ? `${n}名を取り込みました` : '取り込む人はいません'); go('hr-bonus');
+  };
+  $('#bfill').onclick = async () => {
+    const k = $('#bk').value, v = Number($('#bv').value);
+    if ($('#bv').value.trim() === '' || !(v >= 0)) return toast('係数を数字で入れてください', true);
+    const t = list.filter((r) => r[k] == null);
+    if (!t.length) return toast('空欄の人はいません');
+    if (!confirm(`表示中の ${t.length}名の${BONUS_COEFS.find(([x]) => x === k)[1]}に ${v} を入れます。`)) return;
+    await q(sb.from('bonuses').upsert(t.map((r) => ({ round_id: round.id, employee_id: r.employee_id, [k]: v, updated_at: new Date().toISOString() }))));
+    toast('入れました'); go('hr-bonus');
+  };
+  $('#csv').onclick = () => downloadCSV(`賞与_${round.name}.csv`, [
+    ['施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', '在籍加算', '支給額', '備考'],
+    ...list.map((r) => { const e = empBy[r.employee_id]; return [facName(e.facility_id), e.last_name, e.first_name, r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, r.enroll_add, r.total, r.note]; }),
+  ]);
+  // One table-level handler, so rows swapped between view and edit keep working.
+  $('#bt').onclick = async (ev) => {
+    const b = ev.target.closest('button'); if (!b) return;
+    const tr = b.closest('tr'), r = byId[tr?.dataset.id]; if (!r) return;
+    if (b.classList.contains('re')) {
+      if ($('#bt tr.editing')) return toast('修正中の行を保存するか取消してください', true);
+      tr.outerHTML = rowHTML(r, true); $(`#bt tr[data-id="${r.employee_id}"] input`)?.focus();
+    } else if (b.classList.contains('rc')) {
+      tr.outerHTML = rowHTML(r);
+    } else if (b.classList.contains('rd')) {
+      if (!confirm(`${fullName(empBy[r.employee_id])} さんを「${round.name}」から外します。`)) return;
+      await q(sb.from('bonuses').delete().eq('round_id', round.id).eq('employee_id', r.employee_id));
+      toast('外しました'); go('hr-bonus');
+    } else if (b.classList.contains('rs')) {
+      const patch = { updated_at: new Date().toISOString() };
+      for (const i of $$('input', tr)) {
+        const raw = i.value.replace(/,/g, '').trim();
+        if (i.dataset.k === 'note') { patch.note = raw || null; continue; }
+        if (raw !== '' && !(Number(raw) >= 0)) return toast('数字で入れてください', true);
+        patch[i.dataset.k] = raw === '' ? null : Number(raw);
+      }
+      await q(sb.from('bonuses').update(patch).eq('round_id', round.id).eq('employee_id', r.employee_id));
+      toast('保存しました'); go('hr-bonus');
+    }
+  };
 };
 
 // ---------- HR: staff & evaluators ----------
