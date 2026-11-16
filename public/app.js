@@ -95,6 +95,26 @@ function sortable(table, key) {
   });
   apply(JSON.parse(sessionStorage.getItem(`sort:${key}`) || 'null'));
 }
+// A CSV saved by Excel may be Shift_JIS rather than UTF-8: fall back when UTF-8 decoding fails.
+async function readTextFile(file) {
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^﻿/, ''); }
+  catch { return new TextDecoder('shift_jis').decode(buf); }
+}
+function parseCSV(text) {
+  const rows = []; let row = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+}
 function downloadCSV(name, rows) {
   const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const a = document.createElement('a');
@@ -1074,22 +1094,19 @@ VIEWS['hr-bonus'] = async () => {
   render(`
     <div class="row"><h1 class="grow">賞与</h1>
       ${rounds.length ? `<select id="bround">${rounds.map((r) => `<option value="${r.id}" ${r.id === round.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : ''}
-      ${round ? '<button id="badd">給与改定から足りない人を取り込む</button><button id="csv">CSV出力</button>' : ''}</div>
+      ${round ? '<button id="badd">給与改定から足りない人を取り込む</button><button id="csv">CSV出力</button><button id="bimp">CSV取り込み</button><input id="bfile" type="file" accept=".csv,text/csv" hidden>' : ''}</div>
     ${round ? `<p class="muted">評価期間：${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}　／　基本給：${esc(S.periods.find((p) => p.id === round.salary_period_id)?.name ?? '')}の給与改定「基本給(前)」</p>
     <div class="row filters">
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="bkw" placeholder="氏名で検索" value="${esc(kw)}">
       <select id="bst">${optionsHTML([['', 'すべて'], ['todo', '支給額が未確定'], ['done', '支給額が確定']], st)}</select></div>
-    <div class="panel"><div class="row">
-      表示中の人の <select id="bk">${optionsHTML(BONUS_COEFS, 'enroll_coef')}</select> の空欄に
-      <input id="bv" class="xs" inputmode="decimal" placeholder="1.0"> を <button id="bfill">まとめて入れる</button>
-      <span class="muted">（入力済みの人は変わりません）</span></div></div>
     <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
     <div class="panel scroll"><table id="bt">
       <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th><th class="num">在籍加算</th><th class="num">支給額</th><th>備考</th><th></th></tr>
       ${list.map((r) => rowHTML(r)).join('')}
     </table></div>
-    <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝賞与＋在籍加算。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>` : '<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
+    <p class="muted">賞与＝基本給×在籍係数×出勤係数×評価係数（円未満切り捨て）、支給額＝賞与＋在籍加算。係数が1つでも空欄だと賞与・支給額は出ません。右端の ✎ でその行を直せます。</p>
+    <p class="muted">まとめて入れるときは「CSV出力」したファイルに基本給・係数・在籍加算・備考を入れて保存し、「CSV取り込み」で読み込みます。ID の列はそのまま残してください（賞与・支給額の列は読み込みません）。</p>` :'<p class="muted">まだ賞与がありません。下で作成してください。</p>'}
     <div class="panel">
       <h2 style="margin-top:0">新しい賞与を作成</h2>
       <form id="bnf" class="row"><input name="name" placeholder="例：2027年夏季賞与" required>
@@ -1121,19 +1138,48 @@ VIEWS['hr-bonus'] = async () => {
     const n = await seed(round, new Set(rows.map((r) => r.employee_id)));
     toast(n ? `${n}名を取り込みました` : '取り込む人はいません'); go('hr-bonus');
   };
-  $('#bfill').onclick = async () => {
-    const k = $('#bk').value, v = Number($('#bv').value);
-    if ($('#bv').value.trim() === '' || !(v >= 0)) return toast('係数を数字で入れてください', true);
-    const t = list.filter((r) => r[k] == null);
-    if (!t.length) return toast('空欄の人はいません');
-    if (!confirm(`表示中の ${t.length}名の${BONUS_COEFS.find(([x]) => x === k)[1]}に ${v} を入れます。`)) return;
-    await q(sb.from('bonuses').upsert(t.map((r) => ({ round_id: round.id, employee_id: r.employee_id, [k]: v, updated_at: new Date().toISOString() }))));
-    toast('入れました'); go('hr-bonus');
-  };
+  // The CSV goes out with an ID column so a file filled in elsewhere (e.g. Excel) comes back to the same rows.
+  const CSV_HEAD = ['ID', '施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', '在籍加算', '支給額', '備考'];
   $('#csv').onclick = () => downloadCSV(`賞与_${round.name}.csv`, [
-    ['施設', '姓', '名', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', '在籍加算', '支給額', '備考'],
-    ...list.map((r) => { const e = empBy[r.employee_id]; return [facName(e.facility_id), e.last_name, e.first_name, r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, r.enroll_add, r.total, r.note]; }),
+    CSV_HEAD,
+    ...list.map((r) => { const e = empBy[r.employee_id]; return [r.employee_id, facName(e.facility_id), e.last_name, e.first_name, r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, r.enroll_add, r.total, r.note]; }),
   ]);
+  $('#bimp').onclick = () => $('#bfile').click();
+  $('#bfile').onchange = async () => {
+    const file = $('#bfile').files[0]; $('#bfile').value = '';
+    if (!file) return;
+    let cells;
+    try { cells = parseCSV(await readTextFile(file)); } catch { return toast('CSV が読み取れません', true); }
+    const head = (cells.shift() ?? []).map((h) => h.trim());
+    const col = (name) => head.indexOf(name);
+    if (col('ID') < 0) return toast('「CSV出力」で出したファイル（先頭の列が ID）を使ってください', true);
+    // 賞与・支給額 are computed by the database, so those columns are ignored.
+    const fields = [['base_salary', '基本給'], ...BONUS_COEFS, ['enroll_add', '在籍加算']].filter(([, l]) => col(l) >= 0);
+    const have = Object.fromEntries(rows.map((r) => [r.employee_id, r]));
+    const errs = [], ups = [];
+    let unknown = 0;
+    cells.forEach((c, i) => {
+      const id = (c[col('ID')] ?? '').trim();
+      if (!id) return;
+      const r = have[id];
+      if (!r) { unknown++; return; }
+      const o = { round_id: round.id, employee_id: id };
+      for (const [k, l] of fields) {
+        const raw = (c[col(l)] ?? '').replace(/[,円\s]/g, '');
+        if (raw !== '' && !(Number(raw) >= 0)) { errs.push(`${i + 2}行目 ${l}「${c[col(l)]}」`); return; }
+        o[k] = raw === '' ? null : Number(raw);
+      }
+      if (col('備考') >= 0) o.note = (c[col('備考')] ?? '').trim() || null;
+      const changed = Object.keys(o).some((k) => !['round_id', 'employee_id'].includes(k)
+        && (k === 'note' ? (o[k] ?? null) !== (r[k] ?? null) : (o[k] == null ? null : Number(o[k])) !== (r[k] == null ? null : Number(r[k]))));
+      if (changed) ups.push({ ...o, updated_at: new Date().toISOString() });
+    });
+    if (errs.length) return toast(`数字でない値があります：${errs.slice(0, 3).join('、')}${errs.length > 3 ? ` ほか${errs.length - 3}件` : ''}`, true);
+    if (!ups.length) return toast(`変更はありません${unknown ? `（この賞与にいない ID ${unknown}件は無視）` : ''}`);
+    if (!confirm(`${ups.length}名の内容を CSV のとおりに更新します。${unknown ? `\n（この賞与にいない ID ${unknown}件は無視します）` : ''}`)) return;
+    await q(sb.from('bonuses').upsert(ups));
+    toast(`${ups.length}名を更新しました`); go('hr-bonus');
+  };
   // One table-level handler, so rows swapped between view and edit keep working.
   $('#bt').onclick = async (ev) => {
     const b = ev.target.closest('button'); if (!b) return;
