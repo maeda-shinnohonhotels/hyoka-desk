@@ -1064,6 +1064,7 @@ const coefTxt = (v) => (v == null ? '' : String(Number(v)));
 // パート are not in 給与改定; their bonus base (原資) is a flat amount. They get their own tab.
 const PART = 'パート', PART_BASE = 50000;
 const isPart = (e) => e?.employment_type === PART;
+const EMP_TYPES = ['正社員', '契約社員', PART];
 VIEWS['hr-bonus'] = async () => {
   const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
   const rid = Number(sessionStorage.getItem('bround')) || rounds[0]?.id;
@@ -1338,7 +1339,8 @@ VIEWS['hr-staff'] = async (issued) => {
   const fac = Number(sessionStorage.getItem('sfac')) || 0;
   const kw = sessionStorage.getItem('skw') ?? '';
   const role = filterVal('srole'), trk = filterVal('strack'), tgt = filterVal('stgt'), act = filterVal('sact'), evf = filterVal('sev'), emt = filterVal('semp');
-  const empTypes = [...new Set(emps.map((e) => e.employment_type).filter(Boolean))];
+  const empTypes = [...new Set([...EMP_TYPES, ...emps.map((e) => e.employment_type).filter(Boolean)])];
+  const empTypeOpts = (sel) => optionsHTML(empTypes.map((t) => [t, t]), sel ?? '');
   const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw) || (e.employee_no ?? '').includes(kw))
     && (!emt || e.employment_type === emt) && (!role || e.role === role) && (!trk || trackOf(e) === trk) && (!tgt || e.eval_target === (tgt === '1')) && (!act || e.active === (act === '1'))
     && (!evf || (evf === 'none' ? e.eval_target && !links.some((l) => l.employee_id === e.id) : links.some((l) => l.employee_id === e.id && l.evaluator_id === evf))))
@@ -1381,10 +1383,11 @@ VIEWS['hr-staff'] = async (issued) => {
       <p class="muted">評価者の候補は、権限が「一般」以外の社員です。評価者（1次）は一次評価、評価者（2次）は最終決定を入力します。先に下の一覧で権限を変更してください。</p>
     </div>
     <div class="panel scroll"><table id="et">
-      <tr><th>施設</th><th>氏名</th><th>社員番号</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th>ログイン</th><th></th></tr>
+      <tr><th>施設</th><th>氏名</th><th>雇用形態</th><th>社員番号</th><th>等級</th><th>メール</th><th>権限</th><th>評価区分</th><th>評価対象</th><th>在籍</th><th>評価者</th><th>ログイン</th><th></th></tr>
       ${list.map((e) => `<tr data-id="${e.id}">
         <td data-sort="${facSort(e.facility_id)}"><select data-k="facility_id">${facOpts(e.facility_id)}</select></td>
         <td>${esc(fullName(e))}${e.user_id ? ' <span class="chip ok" title="ログイン済み">✓</span>' : ''}</td>
+        <td><select data-k="employment_type">${empTypeOpts(e.employment_type)}</select></td>
         <td><input class="sm" data-k="employee_no" value="${esc(e.employee_no)}" placeholder="未登録"></td>
         <td><input class="xs" data-k="grade" value="${esc(e.grade)}"></td>
         <td><input data-k="email" type="email" value="${esc(e.email)}" placeholder="未登録"${lock(e) ? ' disabled title="人事・取締役のメールは「権限の申請」で変えます"' : ''}></td>
@@ -1400,12 +1403,14 @@ VIEWS['hr-staff'] = async (issued) => {
     <div class="panel">
       <h2 style="margin-top:0">社員を追加</h2>
       <form id="af" class="row">
-        <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm"><input name="employee_no" placeholder="社員番号" class="sm">
+        <input name="last_name" placeholder="姓" required class="sm"><input name="first_name" placeholder="名" class="sm">
+        <select name="employment_type">${empTypeOpts('正社員')}</select><input name="employee_no" placeholder="社員番号" class="sm">
         <select name="facility_id">${facOpts(fac)}</select><input name="grade" placeholder="等級" class="xs">
         <input name="hire_date" type="date"><input name="email" type="email" placeholder="メールアドレス">
         <select name="role">${optionsHTML(plainRoles, 'staff')}</select>
         <select name="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), 'general')}</select>
         <button class="primary">追加</button></form>
+      <p class="muted">パートは評価対象外で追加します。賞与に入れるときは「賞与」のページの「足りない人を取り込む」を押すと、基本給（原資）${yen(PART_BASE)}円で入ります。</p>
     </div>`);
   bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', semp: 'semp', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
   $('#toroles').onclick = (ev) => { ev.preventDefault(); go('hr-roles'); };
@@ -1449,8 +1454,10 @@ VIEWS['hr-staff'] = async (issued) => {
     const o = Object.fromEntries(new FormData(ev.target));
     for (const k in o) if (o[k] === '') o[k] = null;
     o.facility_id = Number(o.facility_id);
+    // パート are not evaluated.
+    if (o.employment_type === PART) o.eval_target = false;
     await q(sb.from('employees').insert(o));
-    toast('追加しました'); go('hr-staff');
+    toast(`${o.last_name} ${o.first_name ?? ''} さんを追加しました`); go('hr-staff');
   };
   $('#csv').onclick = () => downloadCSV('社員一覧.csv', [['施設', '姓', '名', '社員番号', '等級', '入社日', 'メール', '権限', '評価区分', '評価対象', '在籍', '評価者'],
     ...list.map((e) => [facName(e.facility_id), e.last_name, e.first_name, e.employee_no, e.grade, e.hire_date, e.email, ROLE_LABEL[e.role], TRACK_LABEL[trackOf(e)], e.eval_target ? '○' : '', e.active ? '○' : '', evOf(e.id).map(fullName).join('、')])]);
