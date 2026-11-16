@@ -1397,7 +1397,7 @@ VIEWS['hr-staff'] = async (issued) => {
         <td><input type="checkbox" data-k="active" ${e.active ? 'checked' : ''}${lock(e) ? ' disabled' : ''}></td>
         <td>${e.eval_target ? (evOf(e.id).map((v) => esc(fullName(v))).join('、') || '<span class="chip ng">未設定</span>') : ''}</td>
         <td style="white-space:nowrap">${lock(e) ? (e.user_id ? '<span class="chip ok">メール</span>' : '') + (privReissue(e) ? ' <button class="li" title="承認者だけが使えます。仮パスワードを作ります">PW再発行</button>' : '') : `<button class="li" title="社員番号と仮パスワードでログインできるようにします">${e.user_id ? 'PW再発行' : 'ID発行'}</button>`}</td>
-        <td><button class="es">保存</button></td></tr>`).join('')}
+        <td style="white-space:nowrap"><button class="es">保存</button>${lock(e) || e.user_id ? '' : ' <button class="ed danger" title="間違えて入れた社員を消します（評価・給与改定のデータがある人は消せません）">削除</button>'}</td></tr>`).join('')}
     </table></div>
     <p class="muted">人事・取締役の権限をつける・外すとき、人事・取締役の人のメール・在籍を変えるときは、「<a href="#" id="toroles">権限の申請</a>」から申請し、承認を受けてください。</p>
     <div class="panel">
@@ -1438,6 +1438,14 @@ VIEWS['hr-staff'] = async (issued) => {
     });
     await q(sb.from('employees').update(patch).eq('id', tr.dataset.id));
     toast('保存しました'); go('hr-staff');
+  }));
+  // For rows entered by mistake. The database refuses anyone with a login, evaluations or 給与改定 (they become 退職 instead);
+  // their 賞与 rows and evaluator links go with them.
+  $$('#et .ed').forEach((b) => (b.onclick = async () => {
+    const e = by[b.closest('tr').dataset.id];
+    if (!confirm(`${fullName(e)} さん（${facName(e.facility_id)}）を削除します。賞与に入っていれば、その行も消えます。元に戻せません。`)) return;
+    await q(sb.from('employees').delete().eq('id', e.id));
+    toast(`${fullName(e)} さんを削除しました`); go('hr-staff');
   }));
   const bulk = async (add) => {
     const f = Number($('#bfac').value), ev = $('#bev').value;
