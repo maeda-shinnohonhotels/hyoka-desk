@@ -1061,18 +1061,22 @@ VIEWS['hr-raise'] = async () => {
 // 基本給 is copied from 給与改定の「基本給(前)」 of the round's period when the round is made, and can be fixed per row.
 const BONUS_COEFS = [['enroll_coef', '在籍係数'], ['attend_coef', '出勤係数'], ['eval_coef', '評価係数']];
 const coefTxt = (v) => (v == null ? '' : String(Number(v)));
+// パート are not in 給与改定; their bonus base (原資) is a flat amount. They get their own tab.
+const PART = 'パート', PART_BASE = 50000;
+const isPart = (e) => e?.employment_type === PART;
 VIEWS['hr-bonus'] = async () => {
   const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
   const rid = Number(sessionStorage.getItem('bround')) || rounds[0]?.id;
   const round = rounds.find((r) => r.id === rid) ?? rounds[0];
   const [rows, emps] = round ? await Promise.all([
     q(sb.from('bonuses').select('*').eq('round_id', round.id)),
-    q(sb.from('employees').select('id, last_name, first_name, facility_id, active')),
-  ]) : [[], []];
+    q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type')),
+  ]) : [[], await q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type'))];
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const fac = Number(sessionStorage.getItem('fac')) || 0;
-  const kw = filterVal('bkw'), st = filterVal('bst');
-  const valid = rows.filter((r) => empBy[r.employee_id]);
+  const kw = filterVal('bkw'), st = filterVal('bst'), part = filterVal('btype') === 'part';
+  const all = rows.filter((r) => empBy[r.employee_id]);
+  const valid = all.filter((r) => isPart(empBy[r.employee_id]) === part);
   const list = valid.filter((r) => (!fac || empBy[r.employee_id].facility_id === fac) && (!kw || fullName(empBy[r.employee_id]).includes(kw))
     && (!st || (st === 'todo' ? r.total == null : r.total != null)))
     .sort((a, b) => facSort(empBy[a.employee_id].facility_id) - facSort(empBy[b.employee_id].facility_id));
@@ -1096,12 +1100,14 @@ VIEWS['hr-bonus'] = async () => {
   render(`
     <div class="row"><h1 class="grow">賞与</h1>
       ${rounds.length ? `<select id="bround">${rounds.map((r) => `<option value="${r.id}" ${r.id === round.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : ''}
-      ${round ? '<button id="badd">給与改定から足りない人を取り込む</button><button id="csv">CSV出力</button><button id="bimp">CSV取り込み</button><input id="bfile" type="file" accept=".csv,text/csv" hidden>' : ''}</div>
-    ${round ? `<p class="muted">評価期間：${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}　／　基本給：${esc(S.periods.find((p) => p.id === round.salary_period_id)?.name ?? '')}の給与改定「基本給(前)」</p>
+      ${round ? '<button id="badd" title="給与改定にいる社員と、在籍中のパートのうち、まだ入っていない人を足します">足りない人を取り込む</button><button id="csv">CSV出力</button><button id="bimp">CSV取り込み</button><input id="bfile" type="file" accept=".csv,text/csv" hidden>' : ''}</div>
+    ${round ? `<div class="row filters tabs">${[['', '正社員・契約社員'], ['part', PART]].map(([k, l]) => `<button data-btype="${k}" class="${(k === 'part') === part ? 'on' : ''}">${l}（${all.filter((r) => isPart(empBy[r.employee_id]) === (k === 'part')).length}名）</button>`).join('')}</div>
+    <p class="muted">評価期間：${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}　／　基本給：${esc(S.periods.find((p) => p.id === round.salary_period_id)?.name ?? '')}の給与改定「基本給(前)」</p>
     <div class="row filters">
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="bkw" placeholder="氏名で検索" value="${esc(kw)}">
       <select id="bst">${optionsHTML([['', 'すべて'], ['todo', '支給額が未確定'], ['done', '支給額が確定']], st)}</select></div>
+    ${part ? `<p class="muted">パートの基本給（原資）は一律 ${yen(PART_BASE)}円です。</p>` : ''}
     <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円${addOn ? `（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）` : '（在籍加算なし）'}　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
     <div class="panel scroll"><table id="bt">
       <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額</th><th>備考</th><th></th></tr>
@@ -1118,10 +1124,15 @@ VIEWS['hr-bonus'] = async () => {
         <button class="primary">作成</button></form>
       <p class="muted">作成すると、対象者の3つの係数は 1 で始まります（違う人だけ CSV か ✎ で直します）。</p>
     </div>`);
-  // Fill a round with every active employee who has a 給与改定 row in its period and is not in it yet.
+  // Fill a round with every active employee who has a 給与改定 row in its period, and every active パート at the flat base,
+  // who is not in it yet.
   const seed = async (r, have) => {
     const sal = await q(sb.from('salary_revisions').select('employee_id, base_before').eq('period_id', r.salary_period_id));
-    const ins = sal.filter((s) => empBy[s.employee_id]?.active && !have.has(s.employee_id)).map((s) => ({ round_id: r.id, employee_id: s.employee_id, base_salary: s.base_before, enroll_coef: 1, attend_coef: 1, eval_coef: 1 }));
+    const coefs = { enroll_coef: 1, attend_coef: 1, eval_coef: 1 };
+    const ins = [
+      ...sal.filter((s) => empBy[s.employee_id]?.active && !isPart(empBy[s.employee_id]) && !have.has(s.employee_id)).map((s) => ({ round_id: r.id, employee_id: s.employee_id, base_salary: s.base_before, ...coefs })),
+      ...emps.filter((e) => e.active && isPart(e) && !have.has(e.id)).map((e) => ({ round_id: r.id, employee_id: e.id, base_salary: PART_BASE, ...coefs })),
+    ];
     if (ins.length) await q(sb.from('bonuses').insert(ins));
     return ins.length;
   };
@@ -1137,7 +1148,8 @@ VIEWS['hr-bonus'] = async () => {
   if (!round) return;
   $('#bround').onchange = () => { sessionStorage.setItem('bround', $('#bround').value); go('hr-bonus'); };
   bindFilters('hr-bonus', { fac: 'fac', bkw: 'bkw', bst: 'bst' });
-  sortable($('#bt'), 'hr-bonus');
+  $$('[data-btype]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('btype', b.dataset.btype); go('hr-bonus'); }));
+  sortable($('#bt'), `hr-bonus:${part}`);
   $('#badd').onclick = async () => {
     const n = await seed(round, new Set(rows.map((r) => r.employee_id)));
     toast(n ? `${n}名を取り込みました` : '取り込む人はいません'); go('hr-bonus');
@@ -1220,15 +1232,16 @@ VIEWS['hr-staff'] = async (issued) => {
   const by = Object.fromEntries(emps.map((e) => [e.id, e]));
   const fac = Number(sessionStorage.getItem('sfac')) || 0;
   const kw = sessionStorage.getItem('skw') ?? '';
-  const role = filterVal('srole'), trk = filterVal('strack'), tgt = filterVal('stgt'), act = filterVal('sact'), evf = filterVal('sev');
+  const role = filterVal('srole'), trk = filterVal('strack'), tgt = filterVal('stgt'), act = filterVal('sact'), evf = filterVal('sev'), emt = filterVal('semp');
+  const empTypes = [...new Set(emps.map((e) => e.employment_type).filter(Boolean))];
   const list = emps.filter((e) => (!fac || e.facility_id === fac) && (!kw || fullName(e).includes(kw) || (e.email ?? '').includes(kw) || (e.employee_no ?? '').includes(kw))
-    && (!role || e.role === role) && (!trk || trackOf(e) === trk) && (!tgt || e.eval_target === (tgt === '1')) && (!act || e.active === (act === '1'))
+    && (!emt || e.employment_type === emt) && (!role || e.role === role) && (!trk || trackOf(e) === trk) && (!tgt || e.eval_target === (tgt === '1')) && (!act || e.active === (act === '1'))
     && (!evf || (evf === 'none' ? e.eval_target && !links.some((l) => l.employee_id === e.id) : links.some((l) => l.employee_id === e.id && l.evaluator_id === evf))))
     .sort((a, b) => (S.facilities.find((f) => f.id === a.facility_id)?.sort ?? 99) - (S.facilities.find((f) => f.id === b.facility_id)?.sort ?? 99) || Number(b.role !== 'staff') - Number(a.role !== 'staff'));
   const evaluators = emps.filter((e) => e.active && e.role !== 'staff');
   const evOf = (id) => links.filter((l) => l.employee_id === id).map((l) => by[l.evaluator_id]).filter(Boolean);
   const facOpts = (sel) => S.facilities.map((f) => `<option value="${f.id}" ${f.id === sel ? 'selected' : ''}>${esc(f.name)}</option>`).join('');
-  const noEmail = emps.filter((e) => e.active && !e.email).length;
+  const noEmail = emps.filter((e) => e.active && !e.email && !isPart(e)).length;
   // 人事・取締役 rows are locked here: their role, email and 在籍 change only through 権限の申請.
   const lock = (e) => PRIV_ROLES.includes(e.role);
   // Only the approver re-issues another 人事・取締役's password (the Edge Function checks this too).
@@ -1245,6 +1258,7 @@ VIEWS['hr-staff'] = async (issued) => {
     <div class="row filters">
       <select id="sfac"><option value="0">全施設</option>${facOpts(fac)}</select>
       <input id="skw" placeholder="氏名・社員番号・メールで検索" value="${esc(kw)}">
+      <select id="semp">${optionsHTML([['', '雇用形態：すべて'], ...empTypes.map((t) => [t, t])], emt)}</select>
       <select id="srole">${optionsHTML([['', '全権限'], ...Object.entries(ROLE_LABEL)], role)}</select>
       <select id="strack">${optionsHTML([['', '全区分'], ...Object.entries(TRACK_LABEL)], trk)}</select>
       <select id="stgt">${optionsHTML([['', '評価対象：すべて'], ['1', '評価対象のみ'], ['0', '評価対象外のみ']], tgt)}</select>
@@ -1288,7 +1302,7 @@ VIEWS['hr-staff'] = async (issued) => {
         <select name="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), 'general')}</select>
         <button class="primary">追加</button></form>
     </div>`);
-  bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
+  bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', semp: 'semp', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
   $('#toroles').onclick = (ev) => { ev.preventDefault(); go('hr-roles'); };
   if (issued) {
     $('#cppw').onclick = () => navigator.clipboard.writeText(issued.temp_password).then(() => toast('コピーしました'));
