@@ -340,7 +340,7 @@ function buildNav() {
   if (S.me.eval_target) items.push(['self', '自己評価']);
   items.push(['results', '評価結果']);
   if (S.me.role !== 'staff') items.push(['evaluate', '部下の評価']);
-  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-bonus', '賞与'], ['hr-staff', '社員・評価者'], ['hr-roles', '権限の申請'], ['hr-period', '期間・設定']);
+  if (isHR()) items.push(['hr-progress', '進捗'], ['hr-list', '評価一覧'], ['hr-salary', '給与改定'], ['hr-raise', '昇給集計'], ['hr-bonus', '賞与'], ['hr-bonus-sum', '賞与集計'],['hr-staff', '社員・評価者'], ['hr-roles', '権限の申請'], ['hr-period', '期間・設定']);
   $('#nav').innerHTML = items.map(([k, l]) => `<button data-v="${k}">${l}</button>`).join('');
   $$('#nav button').forEach((b) => (b.onclick = () => go(b.dataset.v)));
   if (isHR()) updateRoleBadge();
@@ -1221,6 +1221,111 @@ VIEWS['hr-bonus'] = async () => {
       toast('保存しました'); go('hr-bonus');
     }
   };
+};
+
+// ---------- HR: bonus summary ----------
+// Same layout as 昇給集計. 支給月数 = 賞与 ÷ 基本給. People whose 支給額 is not out yet (a coefficient blank) count as 未確定
+// and are left out of the sums and averages.
+VIEWS['hr-bonus-sum'] = async () => {
+  const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
+  const rid = Number(sessionStorage.getItem('bround')) || rounds[0]?.id;
+  const round = rounds.find((r) => r.id === rid) ?? rounds[0];
+  if (!round) return render('<h1>賞与集計</h1><p class="muted">まだ賞与がありません。「賞与」のページで作成してください。</p>');
+  const [rows, emps] = await Promise.all([
+    q(sb.from('bonuses').select('*').eq('round_id', round.id)),
+    q(sb.from('employees').select('id, last_name, first_name, facility_id, employment_type')),
+  ]);
+  const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
+  const addOn = round.has_enroll_add;
+  const TYPES = { staff: '正社員・契約社員', part: PART };
+  const typeOf = (e) => (isPart(e) ? 'part' : 'staff');
+  // 区分 and 施設 can each be any combination. null = everything ticked.
+  const picked = (key) => { const v = sessionStorage.getItem(key); return v == null ? null : v.split(',').filter(Boolean); };
+  const types = picked('bstypes'), facs = picked('bsfacs')?.map(Number) ?? null;
+  const has = (sel, v) => !sel || sel.includes(v);
+  const kw = filterVal('bskw'), st = filterVal('bsstate');
+  const valid = rows.filter((r) => empBy[r.employee_id]);
+  const count = (t) => valid.filter((r) => typeOf(empBy[r.employee_id]) === t).length;
+  const inType = valid.filter((r) => has(types, typeOf(empBy[r.employee_id])));
+  const list = inType.map((r) => ({ r, e: empBy[r.employee_id] }))
+    .filter(({ r, e }) => has(facs, e.facility_id) && (!kw || fullName(e).includes(kw)) && (!st || (st === 'todo' ? r.total == null : r.total != null)))
+    .sort((a, b) => facSort(a.e.facility_id) - facSort(b.e.facility_id) || a.e.last_name.localeCompare(b.e.last_name, 'ja'));
+  const sum = (arr, k) => arr.reduce((t, x) => t + (x.r[k] ?? 0), 0);
+  const stats = (arr) => {
+    const done = arr.filter((x) => x.r.total != null);
+    const base = sum(done, 'base_salary'), bonus = sum(done, 'bonus'), total = sum(done, 'total');
+    return { n: arr.length, todo: arr.length - done.length, base, bonus, add: sum(done, 'enroll_add'), total,
+      avg: done.length ? Math.round(total / done.length) : 0, months: base ? (bonus / base).toFixed(2) : '0.00' };
+  };
+  const all = stats(list);
+  const byFac = S.facilities.map((f) => ({ f, s: stats(list.filter((x) => x.e.facility_id === f.id)) })).filter((x) => x.s.n);
+  const card = (label, v) => `<div><div class="muted" style="font-size:12px">${label}</div><span class="big" style="font-size:22px">${v}</span></div>`;
+  const chk = (name, v, label, on) => `<label class="chk"><input type="checkbox" name="${name}" value="${v}" ${on ? 'checked' : ''}>${esc(label)}</label>`;
+  const facLabel = !facs || facs.length === S.facilities.length ? '全施設' : facs.length ? facs.map(facName).join('＋') : '（施設を選んでください）';
+  const typeLabel = !types || types.length === 2 ? '正社員・契約社員＋パート' : types.length ? TYPES[types[0]] : '（区分を選んでください）';
+  const bothTypes = !types || types.length > 1;
+  render(`
+    <div class="row"><h1 class="grow">賞与集計</h1>
+      <select id="bround">${rounds.map((r) => `<option value="${r.id}" ${r.id === round.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>
+      <button id="csv">CSV出力</button></div>
+    <div class="panel picks">
+      <div class="row"><b class="pick-h">区分</b>${Object.entries(TYPES).map(([k, l]) => chk('bt', k, `${l}（${count(k)}名）`, has(types, k))).join('')}</div>
+      <div class="row"><b class="pick-h">施設</b>${S.facilities.map((f) => chk('bf', f.id, f.name, has(facs, f.id))).join('')}
+        <button type="button" id="bfall">すべて選ぶ</button><button type="button" id="bfnone">すべて外す</button></div>
+    </div>
+    <p class="muted">集計の対象：<b>${esc(typeLabel)}</b>　／　<b>${esc(facLabel)}</b>　／　評価期間 ${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}</p>
+    <div class="row filters">
+      <input id="bskw" placeholder="氏名で検索" value="${esc(kw)}">
+      <select id="bsstate">${optionsHTML([['', '支給額：すべて'], ['done', '確定'], ['todo', '未確定']], st)}</select>
+      <span class="muted">${list.length} / ${inType.length}名</span></div>
+    <div class="panel summary">
+      ${card('支給額 合計', `${yen(all.total)}円`)}${card('平均 支給額', `${yen(all.avg)}円`)}${card('支給月数（賞与÷基本給）', `${all.months}ヶ月`)}
+      ${card('基本給 合計', `${yen(all.base)}円`)}${addOn ? card('うち在籍加算', `${yen(all.add)}円`) : ''}
+      ${all.todo ? card('未確定', `${all.todo}名`) : ''}
+    </div>
+    <p class="muted">支給額＝賞与${addOn ? '＋在籍加算' : '（この賞与は在籍加算なし）'}。係数が空欄で支給額が出ていない人は「未確定」として合計・平均に入れていません。</p>
+    <h2>施設別</h2>
+    <div class="panel scroll"><table id="bsf">
+      <tr><th>施設</th><th class="num">人数</th><th class="num">基本給 合計</th><th class="num">賞与 合計</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額 合計</th><th class="num">平均 支給額</th><th class="num">支給月数</th><th class="num">未確定</th></tr>
+      ${byFac.map(({ f, s }) => `<tr><td data-sort="${f.sort}">${esc(f.name)}</td><td class="num">${s.n}</td><td class="num">${yen(s.base)}</td><td class="num">${yen(s.bonus)}</td>
+        ${addOn ? `<td class="num">${yen(s.add)}</td>` : ''}<td class="num"><b>${yen(s.total)}</b></td><td class="num">${yen(s.avg)}</td><td class="num">${s.months}</td><td class="num">${s.todo || ''}</td></tr>`).join('')}
+      <tr data-total style="font-weight:600"><td>合計</td><td class="num">${all.n}</td><td class="num">${yen(all.base)}</td><td class="num">${yen(all.bonus)}</td>
+        ${addOn ? `<td class="num">${yen(all.add)}</td>` : ''}<td class="num">${yen(all.total)}</td><td class="num">${yen(all.avg)}</td><td class="num">${all.months}</td><td class="num">${all.todo || ''}</td></tr>
+    </table></div>
+    <h2>個人別</h2>
+    <div class="panel scroll"><table id="bsp">
+      <tr><th>施設</th><th>氏名</th>${bothTypes ? '<th>区分</th>' : ''}<th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額</th></tr>
+      ${list.map(({ r, e }) => `<tr><td data-sort="${facSort(e.facility_id)}">${esc(facName(e.facility_id))}</td><td>${esc(fullName(e))}</td>
+        ${bothTypes ? `<td>${esc(TYPES[typeOf(e)])}</td>` : ''}<td class="num">${yen(r.base_salary)}</td>${BONUS_COEFS.map(([k]) => `<td class="num">${coefTxt(r[k])}</td>`).join('')}
+        <td class="num">${yen(r.bonus)}</td>${addOn ? `<td class="num">${yen(r.enroll_add)}</td>` : ''}
+        <td class="num" data-sort="${r.total ?? ''}">${r.total == null ? '<span class="muted">未確定</span>' : `<b>${yen(r.total)}</b>`}</td></tr>`).join('')}
+    </table></div>`);
+  $('#bround').onchange = () => { sessionStorage.setItem('bround', $('#bround').value); go('hr-bonus-sum'); };
+  bindFilters('hr-bonus-sum', { bskw: 'bskw', bsstate: 'bsstate' });
+  // Save the ticked boxes; when every box is ticked, store nothing so a new facility is included too.
+  const savePicks = (name, key) => {
+    const boxes = $$(`input[name="${name}"]`), on = boxes.filter((b) => b.checked).map((b) => b.value);
+    if (on.length === boxes.length) sessionStorage.removeItem(key); else sessionStorage.setItem(key, on.join(','));
+    go('hr-bonus-sum');
+  };
+  $$('input[name="bt"]').forEach((b) => (b.onchange = () => savePicks('bt', 'bstypes')));
+  $$('input[name="bf"]').forEach((b) => (b.onchange = () => savePicks('bf', 'bsfacs')));
+  $('#bfall').onclick = () => { sessionStorage.removeItem('bsfacs'); go('hr-bonus-sum'); };
+  $('#bfnone').onclick = () => { sessionStorage.setItem('bsfacs', ''); go('hr-bonus-sum'); };
+  // Keep the 合計 row at the bottom when the facility table is re-sorted.
+  const totalRow = $('#bsf tr[data-total]'); totalRow.remove();
+  sortable($('#bsf'), 'hr-bonus-sum-fac');
+  $('#bsf').append(totalRow);
+  $$('#bsf th').forEach((th) => th.addEventListener('click', () => $('#bsf').append(totalRow)));
+  sortable($('#bsp'), `hr-bonus-sum:${bothTypes}:${addOn}`);
+  $('#csv').onclick = () => downloadCSV(`賞与集計_${round.name}_${typeLabel}_${facLabel}.csv`, [
+    ['施設', '人数', '基本給合計', '賞与合計', ...(addOn ? ['在籍加算'] : []), '支給額合計', '平均支給額', '支給月数', '未確定'],
+    ...byFac.map(({ f, s }) => [f.name, s.n, s.base, s.bonus, ...(addOn ? [s.add] : []), s.total, s.avg, s.months, s.todo]),
+    ['合計', all.n, all.base, all.bonus, ...(addOn ? [all.add] : []), all.total, all.avg, all.months, all.todo],
+    [],
+    ['施設', '姓', '名', '区分', '基本給', ...BONUS_COEFS.map(([, l]) => l), '賞与', ...(addOn ? ['在籍加算'] : []), '支給額'],
+    ...list.map(({ r, e }) => [facName(e.facility_id), e.last_name, e.first_name, TYPES[typeOf(e)], r.base_salary, ...BONUS_COEFS.map(([k]) => coefTxt(r[k])), r.bonus, ...(addOn ? [r.enroll_add] : []), r.total ?? '']),
+  ]);
 };
 
 // ---------- HR: staff & evaluators ----------
