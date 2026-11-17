@@ -1065,22 +1065,25 @@ const coefTxt = (v) => (v == null ? '' : String(Number(v)));
 const PART = 'パート', PART_BASE = 50000;
 const isPart = (e) => e?.employment_type === PART;
 const EMP_TYPES = ['正社員', '契約社員', PART];
+// 賞与 and 賞与集計 split people into 一般 / 管理者（評価区分）/ パート.
+const BONUS_TYPES = { general: '一般', manager: '管理者', part: PART };
+const bonusTypeOf = (e) => (isPart(e) ? 'part' : isMgr(e) ? 'manager' : 'general');
 VIEWS['hr-bonus'] = async () => {
   const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
   const rid = Number(sessionStorage.getItem('bround')) || rounds[0]?.id;
   const round = rounds.find((r) => r.id === rid) ?? rounds[0];
   const [rows, emps] = round ? await Promise.all([
     q(sb.from('bonuses').select('*').eq('round_id', round.id)),
-    q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type')),
-  ]) : [[], await q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type'))];
+    q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type, eval_track')),
+  ]) : [[], await q(sb.from('employees').select('id, last_name, first_name, facility_id, active, employment_type, eval_track'))];
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const inRound = new Set(rows.map((r) => r.employee_id));
   const notIn = emps.filter((e) => e.active && !inRound.has(e.id))
     .sort((a, b) => facSort(a.facility_id) - facSort(b.facility_id) || a.last_name.localeCompare(b.last_name, 'ja'));
   const fac = Number(sessionStorage.getItem('fac')) || 0;
-  const kw = filterVal('bkw'), st = filterVal('bst'), part = filterVal('btype') === 'part';
+  const kw = filterVal('bkw'), st = filterVal('bst'), tab = BONUS_TYPES[filterVal('btype')] ? filterVal('btype') : 'general', part = tab === 'part';
   const all = rows.filter((r) => empBy[r.employee_id]);
-  const valid = all.filter((r) => isPart(empBy[r.employee_id]) === part);
+  const valid = all.filter((r) => bonusTypeOf(empBy[r.employee_id]) === tab);
   const list = valid.filter((r) => (!fac || empBy[r.employee_id].facility_id === fac) && (!kw || fullName(empBy[r.employee_id]).includes(kw))
     && (!st || (st === 'todo' ? r.total == null : r.total != null)))
     .sort((a, b) => facSort(empBy[a.employee_id].facility_id) - facSort(empBy[b.employee_id].facility_id));
@@ -1105,7 +1108,8 @@ VIEWS['hr-bonus'] = async () => {
     <div class="row"><h1 class="grow">賞与</h1>
       ${rounds.length ? `<select id="bround">${rounds.map((r) => `<option value="${r.id}" ${r.id === round.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : ''}
       ${round ? '<button id="badd" title="給与改定にいる社員と、在籍中のパートのうち、まだ入っていない人を足します">足りない人を取り込む</button><button id="csv">CSV出力</button><button id="bimp">CSV取り込み</button><input id="bfile" type="file" accept=".csv,text/csv" hidden>' : ''}</div>
-    ${round ? `<div class="row filters tabs">${[['', '正社員・契約社員'], ['part', PART]].map(([k, l]) => `<button data-btype="${k}" class="${(k === 'part') === part ? 'on' : ''}">${l}（${all.filter((r) => isPart(empBy[r.employee_id]) === (k === 'part')).length}名）</button>`).join('')}</div>
+    ${round ? `<div class="row filters tabs">${Object.entries(BONUS_TYPES).map(([k, l]) => `<button data-btype="${k}" class="${k === tab ? 'on' : ''}">${l}（${all.filter((r) => bonusTypeOf(empBy[r.employee_id]) === k).length}名）</button>`).join('')}</div>
+    ${tab === 'part' ? '' : '<p class="muted">一般・管理者は、社員画面の「評価区分」で分かれます。</p>'}
     <p class="muted">評価期間：${esc(round.eval_from ?? '')}～${esc(round.eval_to ?? '')}　／　基本給：${esc(S.periods.find((p) => p.id === round.salary_period_id)?.name ?? '')}の給与改定「基本給(前)」</p>
     <div class="row filters">
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
@@ -1159,7 +1163,7 @@ VIEWS['hr-bonus'] = async () => {
   $('#bround').onchange = () => { sessionStorage.setItem('bround', $('#bround').value); go('hr-bonus'); };
   bindFilters('hr-bonus', { fac: 'fac', bkw: 'bkw', bst: 'bst' });
   $$('[data-btype]').forEach((b) => (b.onclick = () => { sessionStorage.setItem('btype', b.dataset.btype); go('hr-bonus'); }));
-  sortable($('#bt'), `hr-bonus:${part}`);
+  sortable($('#bt'), `hr-bonus:${tab}`);
   $('#badd').onclick = async () => {
     const n = await seed(round, inRound);
     toast(n ? `${n}名を取り込みました` : '取り込む人はいません（給与改定にいない人は「1名ずつ追加」で入れてください）'); go('hr-bonus');
@@ -1178,7 +1182,7 @@ VIEWS['hr-bonus'] = async () => {
     const raw = $('#bbase').value.replace(/[,円\s]/g, '');
     if (raw !== '' && !(Number(raw) >= 0)) return toast('基本給を数字で入れてください', true);
     await q(sb.from('bonuses').insert({ round_id: round.id, employee_id: e.id, base_salary: raw === '' ? null : Number(raw), enroll_coef: 1, attend_coef: 1, eval_coef: 1 }));
-    sessionStorage.setItem('btype', isPart(e) ? 'part' : '');
+    sessionStorage.setItem('btype', bonusTypeOf(e));
     toast(`${fullName(e)} さんを追加しました${raw === '' ? '（基本給が空欄なので、✎ で入れてください）' : ''}`); go('hr-bonus');
   };
   // The CSV goes out with an ID column so a file filled in elsewhere (e.g. Excel) comes back to the same rows.
@@ -1264,9 +1268,7 @@ VIEWS['hr-bonus-sum'] = async () => {
   ]);
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const addOn = round.has_enroll_add;
-  // 正社員・契約社員 split by their 評価区分 (一般 / 管理者); パート on their own.
-  const TYPES = { general: '一般', manager: '管理者', part: PART };
-  const typeOf = (e) => (isPart(e) ? 'part' : isMgr(e) ? 'manager' : 'general');
+  const TYPES = BONUS_TYPES, typeOf = bonusTypeOf;
   // 区分 and 施設 can each be any combination. null = everything ticked.
   const picked = (key) => { const v = sessionStorage.getItem(key); return v == null ? null : v.split(',').filter(Boolean); };
   const typePick = picked('bstypes'), facs = picked('bsfacs')?.map(Number) ?? null;
