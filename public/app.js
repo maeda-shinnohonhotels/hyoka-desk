@@ -1260,15 +1260,18 @@ VIEWS['hr-bonus-sum'] = async () => {
   if (!round) return render('<h1>賞与集計</h1><p class="muted">まだ賞与がありません。「賞与」のページで作成してください。</p>');
   const [rows, emps] = await Promise.all([
     q(sb.from('bonuses').select('*').eq('round_id', round.id)),
-    q(sb.from('employees').select('id, last_name, first_name, facility_id, employment_type')),
+    q(sb.from('employees').select('id, last_name, first_name, facility_id, employment_type, eval_track')),
   ]);
   const empBy = Object.fromEntries(emps.map((e) => [e.id, e]));
   const addOn = round.has_enroll_add;
-  const TYPES = { staff: '正社員・契約社員', part: PART };
-  const typeOf = (e) => (isPart(e) ? 'part' : 'staff');
+  // 正社員・契約社員 split by their 評価区分 (一般 / 管理者); パート on their own.
+  const TYPES = { general: '一般', manager: '管理者', part: PART };
+  const typeOf = (e) => (isPart(e) ? 'part' : isMgr(e) ? 'manager' : 'general');
   // 区分 and 施設 can each be any combination. null = everything ticked.
   const picked = (key) => { const v = sessionStorage.getItem(key); return v == null ? null : v.split(',').filter(Boolean); };
-  const types = picked('bstypes'), facs = picked('bsfacs')?.map(Number) ?? null;
+  const typePick = picked('bstypes'), facs = picked('bsfacs')?.map(Number) ?? null;
+  // A choice saved before 管理者 was split off (e.g. "staff") is dropped.
+  const types = typePick?.every((t) => TYPES[t]) ? typePick : null;
   const has = (sel, v) => !sel || sel.includes(v);
   const kw = filterVal('bskw'), st = filterVal('bsstate');
   const valid = rows.filter((r) => empBy[r.employee_id]);
@@ -1286,10 +1289,14 @@ VIEWS['hr-bonus-sum'] = async () => {
   };
   const all = stats(list);
   const byFac = S.facilities.map((f) => ({ f, s: stats(list.filter((x) => x.e.facility_id === f.id)) })).filter((x) => x.s.n);
+  const byType = Object.entries(TYPES).map(([k, l]) => ({ l, s: stats(list.filter((x) => typeOf(x.e) === k)) })).filter((x) => x.s.n);
+  const statCells = (s) => `<td class="num">${s.n}</td><td class="num">${yen(s.base)}</td><td class="num">${yen(s.bonus)}</td>
+    ${addOn ? `<td class="num">${yen(s.add)}</td>` : ''}<td class="num"><b>${yen(s.total)}</b></td><td class="num">${yen(s.avg)}</td><td class="num">${s.months}</td><td class="num">${s.todo || ''}</td>`;
+  const statHead = `<th class="num">人数</th><th class="num">基本給 合計</th><th class="num">賞与 合計</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額 合計</th><th class="num">平均 支給額</th><th class="num">支給月数</th><th class="num">未確定</th>`;
   const card = (label, v) => `<div><div class="muted" style="font-size:12px">${label}</div><span class="big" style="font-size:22px">${v}</span></div>`;
   const chk = (name, v, label, on) => `<label class="chk"><input type="checkbox" name="${name}" value="${v}" ${on ? 'checked' : ''}>${esc(label)}</label>`;
   const facLabel = !facs || facs.length === S.facilities.length ? '全施設' : facs.length ? facs.map(facName).join('＋') : '（施設を選んでください）';
-  const typeLabel = !types || types.length === 2 ? '正社員・契約社員＋パート' : types.length ? TYPES[types[0]] : '（区分を選んでください）';
+  const typeLabel = !types || types.length === Object.keys(TYPES).length ? '全区分' : types.length ? types.map((t) => TYPES[t]).join('＋') : '（区分を選んでください）';
   const bothTypes = !types || types.length > 1;
   render(`
     <div class="row"><h1 class="grow">賞与集計</h1>
@@ -1311,6 +1318,12 @@ VIEWS['hr-bonus-sum'] = async () => {
       ${all.todo ? card('未確定', `${all.todo}名`) : ''}
     </div>
     <p class="muted">支給額＝賞与${addOn ? '＋在籍加算' : '（この賞与は在籍加算なし）'}。係数が空欄で支給額が出ていない人は「未確定」として合計・平均に入れていません。</p>
+    <h2>区分別</h2>
+    <div class="panel scroll"><table>
+      <tr><th>区分</th>${statHead}</tr>
+      ${byType.map(({ l, s }) => `<tr><td>${esc(l)}</td>${statCells(s)}</tr>`).join('')}
+      <tr style="font-weight:600"><td>合計</td>${statCells(all)}</tr>
+    </table></div>
     <h2>施設別</h2>
     <div class="panel scroll"><table id="bsf">
       <tr><th>施設</th><th class="num">人数</th><th class="num">基本給 合計</th><th class="num">賞与 合計</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額 合計</th><th class="num">平均 支給額</th><th class="num">支給月数</th><th class="num">未確定</th></tr>
@@ -1346,6 +1359,9 @@ VIEWS['hr-bonus-sum'] = async () => {
   $$('#bsf th').forEach((th) => th.addEventListener('click', () => $('#bsf').append(totalRow)));
   sortable($('#bsp'), `hr-bonus-sum:${bothTypes}:${addOn}`);
   $('#csv').onclick = () => downloadCSV(`賞与集計_${round.name}_${typeLabel}_${facLabel}.csv`, [
+    ['区分', '人数', '基本給合計', '賞与合計', ...(addOn ? ['在籍加算'] : []), '支給額合計', '平均支給額', '支給月数', '未確定'],
+    ...byType.map(({ l, s }) => [l, s.n, s.base, s.bonus, ...(addOn ? [s.add] : []), s.total, s.avg, s.months, s.todo]),
+    [],
     ['施設', '人数', '基本給合計', '賞与合計', ...(addOn ? ['在籍加算'] : []), '支給額合計', '平均支給額', '支給月数', '未確定'],
     ...byFac.map(({ f, s }) => [f.name, s.n, s.base, s.bonus, ...(addOn ? [s.add] : []), s.total, s.avg, s.months, s.todo]),
     ['合計', all.n, all.base, all.bonus, ...(addOn ? [all.add] : []), all.total, all.avg, all.months, all.todo],
