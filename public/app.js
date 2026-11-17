@@ -1061,12 +1061,12 @@ VIEWS['hr-raise'] = async () => {
 // 基本給 is copied from 給与改定の「基本給(前)」 of the round's period when the round is made, and can be fixed per row.
 const BONUS_COEFS = [['enroll_coef', '在籍係数'], ['attend_coef', '出勤係数'], ['eval_coef', '評価係数']];
 const coefTxt = (v) => (v == null ? '' : String(Number(v)));
-// パート are not in 給与改定; their bonus base (原資) is a flat amount. They get their own tab.
-const PART = 'パート', PART_BASE = 50000;
-const isPart = (e) => e?.employment_type === PART;
-const EMP_TYPES = ['正社員', '契約社員', PART];
+// パート and アルバイト are not in 給与改定; their bonus base (原資) is a flat amount. They get their own tab.
+const PART = 'パート', ARBEIT = 'アルバイト', PART_BASE = 50000;
+const isPart = (e) => e?.employment_type === PART || e?.employment_type === ARBEIT;
+const EMP_TYPES = ['正社員', '契約社員', PART, ARBEIT];
 // 賞与 and 賞与集計 split people into 一般 / 管理者（評価区分）/ パート.
-const BONUS_TYPES = { general: '一般', manager: '管理者', part: PART };
+const BONUS_TYPES = { general: '一般', manager: '管理者', part: `${PART}・${ARBEIT}` };
 const bonusTypeOf = (e) => (isPart(e) ? 'part' : isMgr(e) ? 'manager' : 'general');
 VIEWS['hr-bonus'] = async () => {
   const rounds = await q(sb.from('bonus_rounds').select('*').order('eval_to', { ascending: false }));
@@ -1115,7 +1115,7 @@ VIEWS['hr-bonus'] = async () => {
       <select id="fac"><option value="0">全施設</option>${S.facilities.map((f) => `<option value="${f.id}" ${f.id === fac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
       <input id="bkw" placeholder="氏名で検索" value="${esc(kw)}">
       <select id="bst">${optionsHTML([['', 'すべて'], ['todo', '支給額が未確定'], ['done', '支給額が確定']], st)}</select></div>
-    ${part ? `<p class="muted">パートの基本給（原資）は一律 ${yen(PART_BASE)}円です。</p>` : ''}
+    ${part ? `<p class="muted">パート・アルバイトの基本給（原資）は一律 ${yen(PART_BASE)}円です。</p>` : ''}
     <p class="muted">支給額の合計 <b>${yen(sum('total'))}</b>円${addOn ? `（賞与 ${yen(sum('bonus'))}円＋在籍加算 ${yen(sum('enroll_add'))}円）` : '（在籍加算なし）'}　${list.length} / ${valid.length}名${todo ? `　<span class="chip warn">未確定 ${todo}名</span>` : ''}</p>
     <div class="panel scroll"><table id="bt">
       <tr><th>施設</th><th>氏名</th><th class="num">基本給</th>${BONUS_COEFS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">賞与</th>${addOn ? '<th class="num">在籍加算</th>' : ''}<th class="num">支給額</th><th>備考</th><th></th></tr>
@@ -1127,7 +1127,7 @@ VIEWS['hr-bonus'] = async () => {
       <h2 style="margin-top:0">1名ずつ追加</h2>
       <div class="row"><select id="bpick"><option value="">追加する人を選ぶ（${notIn.length}名）</option>${notIn.map((e) => `<option value="${e.id}">${esc(facName(e.facility_id))}　${esc(fullName(e))}（${esc(e.employment_type ?? '')}）</option>`).join('')}</select>
         <label class="field">基本給<input id="bbase" class="sm" inputmode="numeric"></label><button id="bone" class="primary">追加</button></div>
-      <p class="muted">給与改定にいない人（新しく入った契約社員など）はここで追加します。基本給は、パートなら ${yen(PART_BASE)}円、給与改定にいる人はその基本給(前)が入ります（直せます）。係数は 1 で入ります。</p>
+      <p class="muted">給与改定にいない人（新しく入った契約社員など）はここで追加します。基本給は、パート・アルバイトなら ${yen(PART_BASE)}円、給与改定にいる人はその基本給(前)が入ります（直せます）。係数は 1 で入ります。</p>
     </div>` : ''}
     <div class="panel">
       <h2 style="margin-top:0">新しい賞与を作成</h2>
@@ -1454,7 +1454,7 @@ VIEWS['hr-staff'] = async (issued) => {
         <select name="role">${optionsHTML(plainRoles, 'staff')}</select>
         <select name="eval_track">${optionsHTML(Object.entries(TRACK_LABEL), 'general')}</select>
         <button class="primary">追加</button></form>
-      <p class="muted">パートは評価対象外で追加します。賞与に入れるときは「賞与」のページの「足りない人を取り込む」を押すと、基本給（原資）${yen(PART_BASE)}円で入ります。</p>
+      <p class="muted">パート・アルバイトは評価対象外で追加します。賞与に入れるときは「賞与」のページの「足りない人を取り込む」を押すと、基本給（原資）${yen(PART_BASE)}円で入ります。</p>
     </div>`);
   bindFilters('hr-staff', { sfac: 'sfac', skw: 'skw', semp: 'semp', srole: 'srole', strack: 'strack', stgt: 'stgt', sact: 'sact', sev: 'sev' });
   $('#toroles').onclick = (ev) => { ev.preventDefault(); go('hr-roles'); };
@@ -1506,8 +1506,8 @@ VIEWS['hr-staff'] = async (issued) => {
     const o = Object.fromEntries(new FormData(ev.target));
     for (const k in o) if (o[k] === '') o[k] = null;
     o.facility_id = Number(o.facility_id);
-    // パート are not evaluated.
-    if (o.employment_type === PART) o.eval_target = false;
+    // パート・アルバイト are not evaluated.
+    if (isPart(o)) o.eval_target = false;
     await q(sb.from('employees').insert(o));
     toast(`${o.last_name} ${o.first_name ?? ''} さんを追加しました`); go('hr-staff');
   };
